@@ -5,12 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Photo Archive</title>
 <style>
-  :root { --gap:16px; --border:#ddd; --muted:#666; --bg:#fff; --bg2:#fafafa; --shadow:0 8px 24px rgba(0,0,0,.12); }
   *{box-sizing:border-box}
+  :root {
+    --gap:16px; --border:#ddd; --muted:#666; --bg:#fff; --bg2:#fafafa;
+    --shadow:0 8px 24px rgba(0,0,0,.12);
+    --card-min: 260px; /* zoomable grid cell */
+  }
   body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu;margin:24px;background:var(--bg2)}
   header.toolbar{display:flex;gap:12px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
   input,select,button{padding:6px 8px}
-  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:var(--gap)}
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--card-min),1fr));gap:var(--gap)}
   .cards.cards--list{display:flex;flex-direction:column}
   .card{border:1px solid var(--border);border-radius:12px;padding:12px;background:var(--bg)}
   .muted{color:var(--muted);font-size:12px}
@@ -21,37 +25,52 @@
   .thumb{max-width:100%;border-radius:8px;margin-bottom:8px}
   .list-row .thumb{max-width:160px}
   .group{display:flex;gap:8px;align-items:center}
-  .stack{display:flex;gap:8px;align-items:flex-start}
-  .stack > *{display:block}
-  /* sleeves multi-select */
-  .ms { position:relative; }
-  .ms__button { display:flex;align-items:center;gap:8px; border:1px solid var(--border); background:var(--bg); border-radius:10px; padding:6px 10px; cursor:pointer; }
-  .ms__button-badge { background:#eee;border-radius:999px;padding:2px 8px;font-size:12px }
-  .ms__popover { position:absolute; top:calc(100% + 8px); left:0; z-index:20; width:280px; background:var(--bg); border:1px solid var(--border); border-radius:12px; box-shadow:var(--shadow); padding:10px; }
-  .ms__popover[hidden]{ display:none; }
-  .ms__search { width:100%; border:1px solid var(--border); border-radius:8px; padding:6px 8px; }
-  .ms__list { margin-top:8px; max-height:220px; overflow:auto; border:1px solid var(--border); border-radius:10px; padding:6px; }
-  .ms__item { display:flex; align-items:center; gap:8px; padding:4px 2px; }
-  .ms__actions { display:flex; gap:8px; margin-top:8px; }
-  .ms__chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
-  .chip { display:flex; align-items:center; gap:6px; background:#f0f0f0; border-radius:999px; padding:2px 8px; font-size:12px; }
-  .chip button { border:none; background:transparent; cursor:pointer; padding:0 2px; font-size:14px; line-height:1; }
+  .ms{position:relative}
+  .ms__button{display:flex;align-items:center;gap:8px;border:1px solid var(--border);background:var(--bg);
+              border-radius:10px;padding:6px 10px;cursor:pointer}
+  .ms__button-badge{background:#eee;border-radius:999px;padding:2px 8px;font-size:12px}
+  .ms__popover{position:absolute;top:calc(100% + 8px);left:0;z-index:20;width:280px;background:var(--bg);
+               border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);padding:10px}
+  .ms__popover[hidden]{display:none}
+  .ms__search{width:100%;border:1px solid var(--border);border-radius:8px;padding:6px 8px}
+  .ms__list{margin-top:8px;max-height:220px;overflow:auto;border:1px solid var(--border);
+            border-radius:10px;padding:6px}
+  .ms__item{display:flex;align-items:center;gap:8px;padding:4px 2px}
+  .ms__actions{display:flex;gap:8px;margin-top:8px}
+  .ms__chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .chip{display:flex;align-items:center;gap:6px;background:#f0f0f0;border-radius:999px;padding:2px 8px;font-size:12px}
+  .chip button{border:none;background:transparent;cursor:pointer;padding:0 2px;font-size:14px;line-height:1}
 </style>
 </head>
 <body>
 <header class="toolbar">
   <h1 style="margin:0">Photo Archive</h1>
-  <div class="group">
-    <label for="film">Film</label>
-    <select id="film"><option value="">All films</option></select>
+
+  <!-- Film multi-select -->
+  <div class="ms" id="filmMs">
+    <button type="button" class="ms__button" id="filmMsBtn" aria-haspopup="listbox" aria-expanded="false">
+      <span>Pick films</span>
+      <span class="ms__button-badge" id="filmMsCount">All</span>
+    </button>
+    <div class="ms__popover" id="filmMsPop" hidden>
+      <input id="filmMsSearch" class="ms__search" placeholder="Search films…" />
+      <div class="ms__actions">
+        <button id="filmMsSelectAll" type="button">Select all (filtered)</button>
+        <button id="filmMsClear" type="button">Clear</button>
+      </div>
+      <div id="filmMsList" class="ms__list" role="listbox" aria-multiselectable="true"></div>
+      <div class="ms__chips" id="filmMsChips"></div>
+    </div>
   </div>
+
+  <!-- Sleeves multi-select -->
   <div class="ms" id="sleevesMs">
     <button type="button" class="ms__button" id="msBtn" aria-haspopup="listbox" aria-expanded="false">
       <span>Pick sleeves</span>
       <span class="ms__button-badge" id="msCount">All</span>
     </button>
     <div class="ms__popover" id="msPop" hidden>
-      <input id="msSearch" class="ms__search" placeholder="Search sleeves… (e.g. 57 or Sleeve: 57)"/>
+      <input id="msSearch" class="ms__search" placeholder="Search sleeves…" />
       <div class="ms__actions">
         <button id="msSelectAll" type="button">Select all (filtered)</button>
         <button id="msClear" type="button">Clear</button>
@@ -60,14 +79,7 @@
       <div class="ms__chips" id="msChips"></div>
     </div>
   </div>
-  <div class="group">
-    <label for="hasprint">Prints</label>
-    <select id="hasprint">
-      <option value="">All</option>
-      <option value="yes">Has PrintID</option>
-      <option value="no">No PrintID</option>
-    </select>
-  </div>
+
   <div class="group">
     <label for="viewMode">View</label>
     <select id="viewMode">
@@ -75,6 +87,7 @@
       <option value="list">List</option>
     </select>
   </div>
+
   <div class="group">
     <label for="sortKey">Sort</label>
     <select id="sortKey">
@@ -84,6 +97,12 @@
       <option value="negative_sleeve">Sleeve (A→Z)</option>
     </select>
   </div>
+
+  <div class="group" style="align-items:center">
+    <label for="zoom">Zoom</label>
+    <input id="zoom" type="range" min="180" max="520" step="20" value="260" />
+  </div>
+
   <button id="toggleThumbs">Hide thumbnails</button>
 </header>
 
@@ -91,230 +110,197 @@
 
 <script>
 (async function(){
-  // Load catalog safely (clear error if missing)
-  async function loadCatalog(){
-    const url = 'catalog.json?ts=' + Date.now();
-    const res = await fetch(url, {cache:'no-store'});
-    if (!res.ok) throw new Error('GET '+url+' → '+res.status+' '+res.statusText);
-    const txt = await res.text();
-    if (!txt.trim()) throw new Error('catalog.json is empty');
-    try { return JSON.parse(txt); } catch(e){ throw new Error('Invalid JSON: '+e.message); }
-  }
-
-  let items = [];
-  try { items = await loadCatalog(); }
-  catch(e){
-    const warn = document.createElement('div');
-    warn.style.cssText='background:#fee;border:1px solid #f99;color:#900;padding:8px 12px;border-radius:8px;margin-bottom:12px';
-    warn.textContent='⚠️ '+e.message;
-    document.body.insertBefore(warn, document.body.firstChild);
-    items = [];
-  }
-
+  const res = await fetch('catalog.json?ts=' + Date.now());
+  const items = await res.json();
   const $ = s => document.querySelector(s);
   const cards = $('#cards');
-  const filmSel = $('#film');
-  const hasPrint = $('#hasprint');
   const viewMode = $('#viewMode');
   const sortKey = $('#sortKey');
   const toggleThumbsBtn = $('#toggleThumbs');
-
-  // Multi-select refs
-  const ms = $('#sleevesMs');
-  const msBtn = $('#msBtn');
-  const msPop = $('#msPop');
-  const msSearch = $('#msSearch');
-  const msList = $('#msList');
-  const msCount = $('#msCount');
-  const msChips = $('#msChips');
-  const msSelectAll = $('#msSelectAll');
-  const msClear = $('#msClear');
+  const zoom = $('#zoom');
 
   const norm = v => (v ?? '').toString().toLowerCase();
   const naturalSort = (a,b)=> String(a).localeCompare(String(b), undefined, {numeric:true, sensitivity:'base'});
 
-  // Populate films
-  const films = Array.from(new Set(items.map(i=>i.film).filter(Boolean))).sort();
-  for (const f of films) {
-    const o = document.createElement('option');
-    o.value = f; o.textContent = f;
-    filmSel.appendChild(o);
+  // ----- Film multi-select -----
+  const filmMs = $('#filmMs');
+  const filmMsBtn = $('#filmMsBtn');
+  const filmMsPop = $('#filmMsPop');
+  const filmMsSearch = $('#filmMsSearch');
+  const filmMsList = $('#filmMsList');
+  const filmMsCount = $('#filmMsCount');
+  const filmMsChips = $('#filmMsChips');
+  const filmMsSelectAll = $('#filmMsSelectAll');
+  const filmMsClear = $('#filmMsClear');
+
+  const allFilms = Array.from(new Set(items.map(i=>i.film).filter(Boolean))).sort(naturalSort);
+  const selectedFilms = new Set();
+  let filteredFilms = allFilms.slice();
+
+  function updateFilmCount(){
+    if (selectedFilms.size === 0){ filmMsCount.textContent = 'All'; return; }
+    const first = Array.from(selectedFilms).sort(naturalSort).slice(0,2).join(', ');
+    filmMsCount.textContent = selectedFilms.size > 2 ? `${first} +${selectedFilms.size-2}` : first || 'All';
   }
-
-  // Prepare sleeves list
-  const allSleeves = Array.from(new Set(items.map(i=>i.negative_sleeve).filter(Boolean))).sort(naturalSort);
-
-  // ----- Multi-select state -----
-  const selectedSleeves = new Set();   // empty => All
-  let filteredSleeves = allSleeves.slice();
-
-  function updateMsCount(){
-    if (selectedSleeves.size === 0) { msCount.textContent = 'All'; return; }
-    const first = Array.from(selectedSleeves).sort(naturalSort).slice(0,2).join(', ');
-    msCount.textContent = selectedSleeves.size > 2 ? `${first} +${selectedSleeves.size-2}` : first || 'All';
-  }
-
-  function renderMsList(){
-    msList.innerHTML = '';
-    for (const s of filteredSleeves){
-      const id = 'sleeve_' + btoa(unescape(encodeURIComponent(s))).replace(/=/g,'');
+  function renderFilmList(){
+    filmMsList.innerHTML='';
+    for (const f of filteredFilms){
+      const id = 'film_' + btoa(unescape(encodeURIComponent(f))).replace(/=/g,'');
       const row = document.createElement('label');
-      row.className = 'ms__item';
+      row.className='ms__item';
       row.setAttribute('role','option');
-      row.setAttribute('aria-selected', selectedSleeves.has(s) ? 'true' : 'false');
-      row.htmlFor = id;
-
-      const cb = document.createElement('input');
-      cb.type = 'checkbox'; cb.id = id; cb.checked = selectedSleeves.has(s);
-      cb.addEventListener('change', ()=>{
-        if (cb.checked) selectedSleeves.add(s); else selectedSleeves.delete(s);
-        row.setAttribute('aria-selected', cb.checked ? 'true' : 'false');
-        renderMsChips(); updateMsCount(); render();
+      row.setAttribute('aria-selected', selectedFilms.has(f));
+      row.htmlFor=id;
+      const cb=document.createElement('input');
+      cb.type='checkbox'; cb.id=id; cb.checked=selectedFilms.has(f);
+      cb.addEventListener('change',()=>{
+        if(cb.checked)selectedFilms.add(f);else selectedFilms.delete(f);
+        row.setAttribute('aria-selected',cb.checked);renderFilmChips();updateFilmCount();render();
       });
-
-      const txt = document.createElement('span');
-      txt.textContent = s;
-
-      row.appendChild(cb); row.appendChild(txt);
-      msList.appendChild(row);
+      const txt=document.createElement('span');txt.textContent=f;
+      row.append(cb,txt); filmMsList.append(row);
     }
   }
+  function renderFilmChips(){
+    filmMsChips.innerHTML='';
+    for(const f of Array.from(selectedFilms).sort(naturalSort)){
+      const chip=document.createElement('span');chip.className='chip';
+      chip.innerHTML=`${f} <button>×</button>`;
+      chip.querySelector('button').addEventListener('click',()=>{
+        selectedFilms.delete(f);renderFilmList();renderFilmChips();updateFilmCount();render();
+      });
+      filmMsChips.append(chip);
+    }
+  }
+  function openFilmMs(){filmMsPop.hidden=false;filmMsBtn.setAttribute('aria-expanded','true');filmMsSearch.focus();}
+  function closeFilmMs(){filmMsPop.hidden=true;filmMsBtn.setAttribute('aria-expanded','false');}
+  filmMsBtn.addEventListener('click',()=>filmMsPop.hidden?openFilmMs():closeFilmMs());
+  document.addEventListener('click',e=>{if(!filmMs.contains(e.target))closeFilmMs();});
+  filmMsSearch.addEventListener('input',()=>{
+    const q=norm(filmMsSearch.value);
+    filteredFilms=allFilms.filter(s=>norm(s).includes(q));
+    renderFilmList();
+  });
+  filmMsSelectAll.addEventListener('click',()=>{
+    for(const f of filteredFilms)selectedFilms.add(f);
+    renderFilmList();renderFilmChips();updateFilmCount();render();
+  });
+  filmMsClear.addEventListener('click',()=>{
+    selectedFilms.clear();renderFilmList();renderFilmChips();updateFilmCount();render();
+  });
+  renderFilmList();updateFilmCount();
 
+  // ----- Sleeves multi-select -----
+  const ms=$('#sleevesMs'),msBtn=$('#msBtn'),msPop=$('#msPop'),msSearch=$('#msSearch'),
+        msList=$('#msList'),msCount=$('#msCount'),msChips=$('#msChips'),
+        msSelectAll=$('#msSelectAll'),msClear=$('#msClear');
+  const allSleeves=Array.from(new Set(items.map(i=>i.negative_sleeve).filter(Boolean))).sort(naturalSort);
+  const selectedSleeves=new Set(); let filteredSleeves=allSleeves.slice();
+  function updateMsCount(){
+    if(selectedSleeves.size===0){msCount.textContent='All';return;}
+    const first=Array.from(selectedSleeves).sort(naturalSort).slice(0,2).join(', ');
+    msCount.textContent=selectedSleeves.size>2?`${first} +${selectedSleeves.size-2}`:first||'All';
+  }
+  function renderMsList(){
+    msList.innerHTML='';
+    for(const s of filteredSleeves){
+      const id='sleeve_'+btoa(unescape(encodeURIComponent(s))).replace(/=/g,'');
+      const row=document.createElement('label');
+      row.className='ms__item';row.htmlFor=id;
+      const cb=document.createElement('input');
+      cb.type='checkbox';cb.id=id;cb.checked=selectedSleeves.has(s);
+      cb.addEventListener('change',()=>{
+        if(cb.checked)selectedSleeves.add(s);else selectedSleeves.delete(s);
+        renderMsChips();updateMsCount();render();
+      });
+      const txt=document.createElement('span');txt.textContent=s;
+      row.append(cb,txt);msList.append(row);
+    }
+  }
   function renderMsChips(){
-    msChips.innerHTML = '';
-    if (selectedSleeves.size === 0) return;
-    for (const s of Array.from(selectedSleeves).sort(naturalSort)){
-      const chip = document.createElement('span');
-      chip.className = 'chip';
-      chip.innerHTML = `${s} <button title="Remove">×</button>`;
-      chip.querySelector('button').addEventListener('click', ()=>{
-        selectedSleeves.delete(s);
-        for (const lab of msList.children){
-          const span = lab.querySelector('span'); const cb = lab.querySelector('input[type="checkbox"]');
-          if (span && span.textContent === s && cb){ cb.checked = false; lab.setAttribute('aria-selected','false'); }
-        }
-        updateMsCount(); renderMsChips(); render();
+    msChips.innerHTML='';
+    for(const s of Array.from(selectedSleeves).sort(naturalSort)){
+      const chip=document.createElement('span');chip.className='chip';
+      chip.innerHTML=`${s} <button>×</button>`;
+      chip.querySelector('button').addEventListener('click',()=>{
+        selectedSleeves.delete(s);renderMsList();renderMsChips();updateMsCount();render();
       });
-      msChips.appendChild(chip);
+      msChips.append(chip);
     }
   }
-
-  function openMs(){ msPop.hidden = false; msBtn.setAttribute('aria-expanded','true'); msSearch.focus(); }
-  function closeMs(){ msPop.hidden = true; msBtn.setAttribute('aria-expanded','false'); }
-
-  msBtn.addEventListener('click', ()=>{ if (msPop.hidden) openMs(); else closeMs(); });
-  document.addEventListener('click', (e)=>{ if (!ms.contains(e.target)) closeMs(); });
-  msSearch.addEventListener('input', ()=>{
-    const q = norm(msSearch.value).replace(/^sleeve[:\s]*/,'');
-    filteredSleeves = allSleeves.filter(s => norm(s).includes(q));
-    renderMsList();
+  function openMs(){msPop.hidden=false;msBtn.setAttribute('aria-expanded','true');msSearch.focus();}
+  function closeMs(){msPop.hidden=true;msBtn.setAttribute('aria-expanded','false');}
+  msBtn.addEventListener('click',()=>msPop.hidden?openMs():closeMs());
+  document.addEventListener('click',e=>{if(!ms.contains(e.target))closeMs();});
+  msSearch.addEventListener('input',()=>{
+    const q=norm(msSearch.value);
+    filteredSleeves=allSleeves.filter(s=>norm(s).includes(q));renderMsList();
   });
-  msSelectAll.addEventListener('click', ()=>{
-    for (const s of filteredSleeves) selectedSleeves.add(s);
-    renderMsList(); renderMsChips(); updateMsCount(); render();
+  msSelectAll.addEventListener('click',()=>{
+    for(const s of filteredSleeves)selectedSleeves.add(s);
+    renderMsList();renderMsChips();updateMsCount();render();
   });
-  msClear.addEventListener('click', ()=>{
-    selectedSleeves.clear();
-    renderMsList(); renderMsChips(); updateMsCount(); render();
+  msClear.addEventListener('click',()=>{
+    selectedSleeves.clear();renderMsList();renderMsChips();updateMsCount();render();
   });
+  renderMsList();updateMsCount();
 
-  renderMsList(); updateMsCount();
+  // Zoom slider
+  function applyZoom(px){document.documentElement.style.setProperty('--card-min',px+'px');}
+  applyZoom(zoom.value);
+  zoom.addEventListener('input',()=>applyZoom(zoom.value));
 
-  // ----- Archive rendering -----
-  let showThumbs = true;
-
+  // ----- Main filtering -----
+  let showThumbs=true;
   function matches(i){
-    if (filmSel.value && i.film !== filmSel.value) return false;
-    if (hasPrint.value === 'yes' && !i.print_id) return false;
-    if (hasPrint.value === 'no'  &&  i.print_id) return false;
-    if (selectedSleeves.size > 0){
-      const val = i.negative_sleeve || '';
-      if (!selectedSleeves.has(val)) return false;
-    }
+    if(selectedFilms.size>0&&!selectedFilms.has(i.film||''))return false;
+    if(selectedSleeves.size>0&&!selectedSleeves.has(i.negative_sleeve||''))return false;
     return true;
   }
-
   function sortItems(arr){
-    const key = sortKey.value;
+    const key=sortKey.value;
     return arr.slice().sort((a,b)=>{
-      const A = (a?.[key] ?? '').toString().toLowerCase();
-      const B = (b?.[key] ?? '').toString().toLowerCase();
-      return A < B ? -1 : A > B ? 1 : 0;
+      const A=(a?.[key]??'').toString().toLowerCase();
+      const B=(b?.[key]??'').toString().toLowerCase();
+      return A<B?-1:A>B?1:0;
     });
   }
-
   function render(){
-    cards.classList.toggle('cards--list', viewMode.value === 'list');
-
-    const filtered = items.filter(matches);
-    const sorted = sortItems(filtered);
-
-    cards.innerHTML = '';
-    for (const i of sorted){
-      const card = document.createElement('div');
-      card.className = 'card';
-      const title = (i.print_id || i.title || 'Untitled');
-
-      const row = document.createElement('div');
-      if (viewMode.value === 'list') row.className = 'list-row';
-
-      if (i.thumb_path){
-        const img = document.createElement('img');
-        img.className = 'thumb';
-        img.src = i.thumb_path + '?ts=' + Date.now();
-        img.alt = title;
-        img.style.display = showThumbs ? 'block' : 'none';
-        row.appendChild(img);
+    cards.classList.toggle('cards--list',viewMode.value==='list');
+    const filtered=sortItems(items.filter(matches));
+    cards.innerHTML='';
+    for(const i of filtered){
+      const card=document.createElement('div');card.className='card';
+      const title=i.print_id||i.title||'Untitled';
+      const row=document.createElement('div');
+      if(viewMode.value==='list')row.className='list-row';
+      if(i.thumb_path){
+        const img=document.createElement('img');img.className='thumb';
+        img.src=i.thumb_path+'?ts='+Date.now();img.alt=title;
+        img.style.display=showThumbs?'block':'none';row.append(img);
       }
-
-      const content = document.createElement('div');
-
-      const h = document.createElement('div');
-      h.className = 'row';
-      h.innerHTML = `<strong>${title}</strong>`;
-      content.appendChild(h);
-
-      const meta = document.createElement('div');
-      meta.innerHTML =
-        `<div class="row">`+
-        (i.print_id?`<span class="pill">PrintID: ${i.print_id}</span>`:'')+
-        (i.negative_sleeve?`<span class="pill">Sleeve: ${i.negative_sleeve}</span>`:'')+
-        (i.frame_number?`<span class="pill">Frame: ${i.frame_number}</span>`:'')+
-        (i.film?`<span class="pill">Film: ${i.film}</span>`:'')+
-        `</div>`;
-      content.appendChild(meta);
-
-      if (i.title || i.description){
-        const p = document.createElement('div');
-        p.className = 'row muted';
-        p.textContent = [i.title, i.description].filter(Boolean).join(' — ');
-        content.appendChild(p);
-      }
-
-      if (i.file_path){
-        const link = document.createElement('a');
-        link.href = i.file_path;
-        link.textContent = 'Local file path';
-        link.target = '_blank';
-        content.appendChild(link);
-      }
-
-      row.appendChild(content);
-      card.appendChild(row);
-      cards.appendChild(card);
+      const content=document.createElement('div');
+      const h=document.createElement('div');h.className='row';h.innerHTML='<strong>'+title+'</strong>';content.append(h);
+      const meta=document.createElement('div');
+      meta.innerHTML='<div class="row">'+
+        (i.print_id?'<span class="pill">PrintID: '+i.print_id+'</span>':'')+
+        (i.negative_sleeve?'<span class="pill">Sleeve: '+i.negative_sleeve+'</span>':'')+
+        (i.frame_number?'<span class="pill">Frame: '+i.frame_number+'</span>':'')+
+        (i.film?'<span class="pill">Film: '+i.film+'</span>':'')+
+        '</div>';
+      content.append(meta);
+      if(i.description){const p=document.createElement('div');p.className='row muted';p.textContent=i.description;content.append(p);}
+      if(i.file_path){const link=document.createElement('a');link.href=i.file_path;link.textContent='Local file path';link.target='_blank';content.append(link);}
+      row.append(content);card.append(row);cards.append(card);
     }
   }
-
-  filmSel.addEventListener('change', render);
-  hasPrint.addEventListener('change', render);
-  viewMode.addEventListener('change', render);
-  sortKey.addEventListener('change', render);
-  toggleThumbsBtn.addEventListener('click', ()=>{
-    showThumbs = !showThumbs;
-    toggleThumbsBtn.textContent = showThumbs ? 'Hide thumbnails' : 'Show thumbnails';
+  viewMode.addEventListener('change',render);
+  sortKey.addEventListener('change',render);
+  toggleThumbsBtn.addEventListener('click',()=>{
+    showThumbs=!showThumbs;
+    toggleThumbsBtn.textContent=showThumbs?'Hide thumbnails':'Show thumbnails';
     render();
   });
-
   render();
 })();
 </script>
