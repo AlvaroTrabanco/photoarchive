@@ -14,6 +14,12 @@ THUMBS_DIR="$SITE_DIR/thumbs"
 # Control parsing parallelism:
 JOBS="${JOBS:-0}"
 
+# Control whether index.html is rewritten by the Python build:
+#   force = always rewrite
+#   auto  = write only if missing (default)
+#   skip  = never write index.html
+HTML_MODE="${HTML_MODE:-force}"
+
 # ⭐ Save absolute path to the project directory (where serve.sh lives)
 SCRIPT_DIR="$(cd -- "$(dirname "$0")" && pwd -P)"
 
@@ -31,7 +37,8 @@ python3 xmp_archive_harvester.py \
   --thumb-size 512 \
   --select auto \
   --log INFO \
-  --jobs "$JOBS"
+  --jobs "$JOBS" \
+  --html "$HTML_MODE"
 
 echo "== Build OK =="
 ls -l "$SITE_DIR/index.html" "$SITE_DIR/catalog.json" || true

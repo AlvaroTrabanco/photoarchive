@@ -1,0 +1,58 @@
+{
+  "series": [
+    {
+      "id": "M2025",
+      "title": "",
+      "description": "6x6 shot in 2025",
+      "prefix": "M2025",
+      "format": "",
+      "first_number": 1,
+      "last_number": 31
+    },
+    {
+      "id": "M2024",
+      "title": "",
+      "description": "6x6 shot in 2024",
+      "prefix": "M2024",
+      "format": "",
+      "first_number": 1,
+      "last_number": 128
+    },
+    {
+      "id": "M2023",
+      "title": "",
+      "description": "6x6 shot in 2023",
+      "prefix": "M2023",
+      "format": "",
+      "first_number": 1,
+      "last_number": 53
+    },
+    {
+      "id": "2024",
+      "title": "",
+      "description": "35 mm shot in 2024",
+      "prefix": "2024",
+      "format": "",
+      "first_number": 1,
+      "last_number": 7
+    },
+    {
+      "id": "2023",
+      "title": "",
+      "description": "35 mm shot in 2023",
+      "prefix": "2023",
+      "format": "",
+      "first_number": 1,
+      "last_number": 34
+    },
+    {
+      "id": "2022",
+      "title": "",
+      "description": "35 mm shot in 2022",
+      "prefix": "2022",
+      "format": "",
+      "first_number": 1,
+      "last_number": 13
+    }
+  ]
+}
