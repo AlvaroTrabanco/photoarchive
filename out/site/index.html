@@ -18,13 +18,14 @@
   .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--card-min),1fr));gap:var(--gap)}
   .cards.cards--list{display:flex;flex-direction:column}
   .card{border:1px solid var(--border);border-radius:12px;padding:12px;background:var(--bg)}
+  .card--active{outline:2px solid orange;outline-offset:2px}
   .muted{color:var(--muted);font-size:12px}
   .row{margin:6px 0}
   a{word-break:break-all}
   .pill{display:inline-block;border:1px solid #ccc;border-radius:999px;padding:2px 8px;margin-right:6px;font-size:12px}
   .pill--missing{border-color:#e99;background:#fff4f4;color:#b40000}
   .list-row{display:flex;gap:12px;align-items:flex-start}
-  .thumb{max-width:100%;border-radius:8px;margin-bottom:8px}
+  .thumb{max-width:100%;border-radius:8px;margin-bottom:8px;cursor:pointer}
   .list-row .thumb{max-width:160px}
   .thumb--placeholder{display:flex;align-items:center;justify-content:center;
                       aspect-ratio:4/3;border:2px dashed #ddd;border-radius:8px;background:#fafafa;
@@ -166,7 +167,7 @@
 
 <div id="cards" class="cards"></div>
 
-<!-- Modal -->
+<!-- Modal: Archive editor -->
 <div id="editorBackdrop" class="modal-backdrop" aria-hidden="true">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="editorTitle">
     <header>
@@ -191,10 +192,27 @@
   </div>
 </div>
 
+<!-- Lightbox for enlarged photo -->
+<div id="lightboxBackdrop" class="modal-backdrop" aria-hidden="true">
+  <div class="modal" id="lightboxModal" aria-modal="true" role="dialog">
+    <header style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <div>
+        <button id="lightboxPrev" class="btn">&larr; Prev</button>
+        <button id="lightboxNext" class="btn">Next &rarr;</button>
+      </div>
+      <button id="lightboxClose" class="btn">× Close</button>
+    </header>
+
+    <img id="lightboxImage"
+         alt=""
+         style="max-width:100%;height:auto;display:block;margin:0 auto 4px;" />
+
+    <!-- Caption for title / print_id -->
+    <div id="lightboxCaption" class="muted" style="text-align:center;margin-top:4px;"></div>
+  </div>
+</div>
+
 <script>
-
-
-
 console.log("ARCHIVE-HTML v2.4 — grid/list + sort + status + editor + clear filters loaded");
 
 (async function(){
@@ -292,85 +310,84 @@ Is filehelper.py running?`);
   setCount(totalCount); // initial: before any filters apply
 
   // Backfill + normalize fields for the UI
-  // Backfill + normalize fields for the UI
-for (const i of items) {
-  // Treat negative scans as "Missing"
-  if (i.negative_scan) i.missing = true;
+  for (const i of items) {
+    // Treat negative scans as "Missing"
+    if (i.negative_scan) i.missing = true;
 
-  // Build a token pool
-  const pool = []
-    .concat(Array.isArray(i.keywords_list) ? i.keywords_list : [])
-    .concat((i.keywords_text || '').split(/[;,]/))
-    .concat((i.hierarchical_keywords || '').split(/[;]+/)); // keep pipe groups intact for parsing
+    // Build a token pool
+    const pool = []
+      .concat(Array.isArray(i.keywords_list) ? i.keywords_list : [])
+      .concat((i.keywords_text || '').split(/[;,]/))
+      .concat((i.hierarchical_keywords || '').split(/[;]+/)); // keep pipe groups intact for parsing
 
-  // 1) From hierarchical paths like "Archive|Film|Kodak Tri-X 400"
-  if (!i.film || !i.negative_sleeve || !i.frame_number) {
-    for (const raw of (i.hierarchical_keywords || '').split(/[;]+/)) {
-      const parts = String(raw || '').split('|').map(s => s.trim()).filter(Boolean);
-      const idxFilm = parts.findIndex(p => /^film$/i.test(p));
-      if (!i.film && idxFilm >= 0 && parts[idxFilm + 1]) {
-        i.film = parts.slice(idxFilm + 1).join(' | '); // keep full remainder if nested
+    // 1) From hierarchical paths like "Archive|Film|Kodak Tri-X 400"
+    if (!i.film || !i.negative_sleeve || !i.frame_number) {
+      for (const raw of (i.hierarchical_keywords || '').split(/[;]+/)) {
+        const parts = String(raw || '').split('|').map(s => s.trim()).filter(Boolean);
+        const idxFilm = parts.findIndex(p => /^film$/i.test(p));
+        if (!i.film && idxFilm >= 0 && parts[idxFilm + 1]) {
+          i.film = parts.slice(idxFilm + 1).join(' | '); // keep full remainder if nested
+        }
+        const idxSleeve = parts.findIndex(p => /^(negative)?sleeve$/i.test(p) || /^negative\s*sleeve$/i.test(p));
+        if (!i.negative_sleeve && idxSleeve >= 0 && parts[idxSleeve + 1]) {
+          i.negative_sleeve = parts[idxSleeve + 1];
+        }
+        const idxFrame = parts.findIndex(p => /^frame$/i.test(p));
+        if (!i.frame_number && idxFrame >= 0 && parts[idxFrame + 1]) {
+          i.frame_number = parts[idxFrame + 1];
+        }
       }
-      const idxSleeve = parts.findIndex(p => /^(negative)?sleeve$/i.test(p) || /^negative\s*sleeve$/i.test(p));
-      if (!i.negative_sleeve && idxSleeve >= 0 && parts[idxSleeve + 1]) {
-        i.negative_sleeve = parts[idxSleeve + 1];
-      }
-      const idxFrame = parts.findIndex(p => /^frame$/i.test(p));
-      if (!i.frame_number && idxFrame >= 0 && parts[idxFrame + 1]) {
-        i.frame_number = parts[idxFrame + 1];
+    }
+
+    // 2) Fallbacks from flat tokens like "Frame:5" or "NegativeSleeve:57"
+    if (!i.film || !i.negative_sleeve || !i.frame_number) {
+      for (const raw of pool) {
+        const t = String(raw || '').trim();
+        if (!i.film) {
+          const mFilm = t.match(/^(?:film[:=]\s*)(.+)$/i);
+          if (mFilm) i.film = mFilm[1].trim();
+        }
+        if (!i.negative_sleeve) {
+          const mSleeve = t.match(/^(?:neg(?:ative)?[_\s-]?sleeve|sleeve)\s*[:=]\s*([A-Za-z0-9._ -]+)$/i);
+          if (mSleeve) i.negative_sleeve = mSleeve[1].trim();
+        }
+        if (!i.frame_number) {
+          const mFrame = t.match(/^frame\s*[:=]\s*([A-Za-z0-9._ -]+)$/i);
+          if (mFrame) i.frame_number = mFrame[1].trim();
+        }
       }
     }
   }
 
-  // 2) Fallbacks from flat tokens like "Frame:5" or "NegativeSleeve:57"
-  if (!i.film || !i.negative_sleeve || !i.frame_number) {
-    for (const raw of pool) {
-      const t = String(raw || '').trim();
-      if (!i.film) {
-        const mFilm = t.match(/^(?:film[:=]\s*)(.+)$/i);
-        if (mFilm) i.film = mFilm[1].trim();
-      }
-      if (!i.negative_sleeve) {
-        const mSleeve = t.match(/^(?:neg(?:ative)?[_\s-]?sleeve|sleeve)\s*[:=]\s*([A-Za-z0-9._ -]+)$/i);
-        if (mSleeve) i.negative_sleeve = mSleeve[1].trim();
-      }
-      if (!i.frame_number) {
-        const mFrame = t.match(/^frame\s*[:=]\s*([A-Za-z0-9._ -]+)$/i);
-        if (mFrame) i.frame_number = mFrame[1].trim();
+  // Ensure every real item gets a series_id from its print_id prefix
+  (function assignSeriesIds(){
+    const defs = (registry.series || []);
+    function idOrPrefix(s){ return (s.id && String(s.id).trim()) || (s.prefix || ''); }
+    for (const it of items){
+      if (it.series_id || !it.print_id) continue;
+      const pid = String(it.print_id);
+      for (const s of defs){
+        const pref = idOrPrefix(s);
+        if (pref && pid.startsWith(pref)){
+          it.series_id = idOrPrefix(s);
+          break;
+        }
       }
     }
+  })();
+
+  function toFileURL(absPath, opts) {
+    opts = opts || {};
+    var folder = !!opts.folder;
+
+    if (!absPath) return "";
+    // Windows-safe: convert backslashes → slashes without regex pitfalls
+    var p = String(absPath).split("\\").join("/");
+
+    if (folder) p = p.replace(/\/[^\/]+$/, "/");   // strip filename → keep trailing slash
+    if (!p.startsWith("/")) p = "/" + p;           // ensure leading slash
+    return "file://" + encodeURI(p);               // file:///… (properly encoded)
   }
-}
-
-// Ensure every real item gets a series_id from its print_id prefix
-(function assignSeriesIds(){
-  const defs = (registry.series || []);
-  function idOrPrefix(s){ return (s.id && String(s.id).trim()) || (s.prefix || ''); }
-  for (const it of items){
-    if (it.series_id || !it.print_id) continue;
-    const pid = String(it.print_id);
-    for (const s of defs){
-      const pref = idOrPrefix(s);
-      if (pref && pid.startsWith(pref)){
-        it.series_id = idOrPrefix(s);
-        break;
-      }
-    }
-  }
-})();
-
-function toFileURL(absPath, opts) {
-  opts = opts || {};
-  var folder = !!opts.folder;
-
-  if (!absPath) return "";
-  // Windows-safe: convert backslashes → slashes without regex pitfalls
-  var p = String(absPath).split("\\").join("/");
-
-  if (folder) p = p.replace(/\/[^\/]+$/, "/");   // strip filename → keep trailing slash
-  if (!p.startsWith("/")) p = "/" + p;           // ensure leading slash
-  return "file://" + encodeURI(p);               // file:///… (properly encoded)
-}
 
   // -------- UI references
   const $ = s => document.querySelector(s);
@@ -384,6 +401,81 @@ function toFileURL(absPath, opts) {
   const toggleThumbsBtn = $('#toggleThumbs');
   const zoom = $('#zoom');
   const clearFiltersBtn = $('#clearFilters');
+
+  // Lightbox DOM
+  const lightboxBackdrop = document.getElementById('lightboxBackdrop');
+  const lightboxImg = document.getElementById('lightboxImage'); // ID = lightboxImage in HTML
+  const lightboxClose = document.getElementById('lightboxClose');
+  const lightboxPrev = document.getElementById('lightboxPrev');
+  const lightboxNext = document.getElementById('lightboxNext');
+  const lightboxCaption = document.getElementById('lightboxCaption');
+
+  // Lightbox state
+  let lightboxItems = [];          // only items with thumbnails, in DOM order
+  let lightboxCurrentIndex = -1;   // index into lightboxItems
+  let lightboxCurrentId = null;    // stable id for card highlight
+
+
+    function openLightboxForIndex(idx){
+    if (!lightboxItems.length) return;
+
+    const n = lightboxItems.length;
+    // safe wrap-around
+    lightboxCurrentIndex = ((idx % n) + n) % n;
+
+    const rec = lightboxItems[lightboxCurrentIndex];
+    if (!rec || !rec.thumb_path) return;
+
+    // stable key used by render() to add .card--active
+    lightboxCurrentId = rec.thumb_path || rec.file_path || rec.print_id || null;
+
+    lightboxImg.src = rec.thumb_path + '?ts=' + Date.now();
+    lightboxImg.alt = rec.print_id || rec.title || '';
+
+    if (lightboxCaption) {
+      lightboxCaption.textContent = rec.print_id || rec.title || '';
+    }
+
+    lightboxBackdrop.style.display = 'flex';
+    lightboxBackdrop.setAttribute('aria-hidden', 'false');
+
+    // re-render to update orange border on the matching card
+    render();
+  }
+
+  function closeLightbox() {
+    lightboxBackdrop.style.display = 'none';
+    lightboxBackdrop.setAttribute('aria-hidden', 'true');
+    lightboxImg.src = '';
+    lightboxImg.alt = '';
+    lightboxCurrentIndex = -1;
+    lightboxCurrentId = null;
+
+    // re-render to remove .card--active from any card
+    render();
+  }
+
+  function showPrev() {
+    if (!lightboxItems.length || lightboxCurrentIndex < 0) return;
+    openLightboxForIndex(lightboxCurrentIndex - 1);
+  }
+
+  function showNext() {
+    if (!lightboxItems.length || lightboxCurrentIndex < 0) return;
+    openLightboxForIndex(lightboxCurrentIndex + 1);
+  }
+
+
+  lightboxClose.addEventListener('click', closeLightbox);
+  lightboxPrev.addEventListener('click', showPrev);
+  lightboxNext.addEventListener('click', showNext);
+
+  // Click outside the modal closes the lightbox
+  lightboxBackdrop.addEventListener('click', (e) => {
+    if (e.target === lightboxBackdrop) {
+      closeLightbox();
+    }
+  });
 
   // film & sleeves & series multiselect DOM
   const filmMs = $('#filmMs'), filmMsBtn = $('#filmMsBtn'), filmMsPop = $('#filmMsPop'),
@@ -593,89 +685,133 @@ function toFileURL(absPath, opts) {
       return collator.compare(A,B);
     });
   }
-  function render(){
-    cards.classList.toggle('cards--list', viewMode.value==='list');
-    const filtered = sortItems(items.filter(matches));
-    setCount(filtered.length);
-    cards.innerHTML='';
-    for(const i of filtered){
-      const card=document.createElement('div'); card.className='card';
-      const title=(i.print_id || i.title || 'Untitled');
-      const row=document.createElement('div'); if(viewMode.value==='list') row.className='list-row';
+  
+function render(){
+  cards.classList.toggle('cards--list', viewMode.value === 'list');
+  const filtered = sortItems(items.filter(matches));
+  setCount(filtered.length);
+  cards.innerHTML = '';
 
-      if(i.thumb_path){
-        const img=document.createElement('img'); img.className='thumb';
-        img.src=i.thumb_path+'?ts='+Date.now(); img.alt=title;
-        img.style.display=showThumbs?'block':'none'; row.append(img);
-      } else if(i.missing){
-        const ph=document.createElement('div'); ph.className='thumb thumb--placeholder';
-        ph.textContent='No scan yet'; row.append(ph);
-      }
+  // Lightbox list: only items that have a thumbnail, in the same visual order
+  lightboxItems = filtered.filter(i => i.thumb_path);
 
-      const content=document.createElement('div');
-      const h=document.createElement('div'); h.className='row'; h.innerHTML='<strong>'+title+'</strong>'; content.append(h);
+  filtered.forEach((i) => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    const title = (i.print_id || i.title || 'Untitled');
+    const row = document.createElement('div');
+    if (viewMode.value === 'list') row.className = 'list-row';
 
-      const meta=document.createElement('div');
-      meta.innerHTML = '<div class="row">'
-        + (i.missing ? '<span class="pill pill--missing">Missing</span>' : '')
-        + (i.negative_scan && !i.missing ? '<span class="pill">Neg scan</span>' : '')
-        + (i.negative_sleeve ? '<span class="pill">Sleeve: '+i.negative_sleeve+'</span>' : '')
-        + (i.frame_number ? '<span class="pill">Frame: '+i.frame_number+'</span>' : '')
-        + (i.film ? '<span class="pill">Film: '+i.film+'</span>' : '')
-        + '</div>';
-      content.append(meta);
+    // used for click handler if this item is in lightboxItems
+    let thisLightboxIndex = -1;
 
-      if(i.description){ const p=document.createElement('div'); p.className='row muted'; p.textContent=i.description; content.append(p); }
-      if (i.file_path && !i.missing) {
-        const rowEl = document.createElement('div');
-        rowEl.className = 'row';
+    if (i.thumb_path) {
+      const img = document.createElement('img');
+      img.className = 'thumb';
+      img.src = i.thumb_path + '?ts=' + Date.now();
+      img.alt = title;
+      img.style.display = showThumbs ? 'block' : 'none';
 
-        async function action(cmd, path){
-          try{
-            const res = await fetch('/action', {
-              method: 'POST',
-              headers: {'Content-Type':'application/json'},
-              body: JSON.stringify({cmd, path})
-            });
-            if(!res.ok){
-              const t = await res.text();
-              throw new Error(t || res.status);
-            }
-          }catch(e){
-            alert(`Could not ${cmd}: ${e}`);
-          }
+      // find this record's index inside lightboxItems (thumb-only list)
+      thisLightboxIndex = lightboxItems.indexOf(i);
+
+      img.addEventListener('click', () => {
+        if (thisLightboxIndex !== -1) {
+          openLightboxForIndex(thisLightboxIndex);
         }
+      });
 
-        const btnReveal = document.createElement('button');
-        btnReveal.className = 'btn';
-        btnReveal.type = 'button';
-        btnReveal.textContent = 'Reveal in Finder';
-        btnReveal.addEventListener('click', ()=> action('reveal', i.file_path));
-
-        const btnOpen = document.createElement('button');
-        btnOpen.className = 'btn';
-        btnOpen.type = 'button';
-        btnOpen.textContent = 'Open file';
-        btnOpen.addEventListener('click', ()=> action('open', i.file_path));
-
-        const copyBtn = document.createElement('button');
-        copyBtn.className = 'btn';
-        copyBtn.type = 'button';
-        copyBtn.textContent = 'Copy path';
-        copyBtn.addEventListener('click', async () => {
-          try {
-            await navigator.clipboard.writeText(i.file_path);
-            copyBtn.textContent = 'Copied!';
-            setTimeout(() => (copyBtn.textContent = 'Copy path'), 1000);
-          } catch {}
-        });
-
-        rowEl.append(btnReveal, document.createTextNode(' '), btnOpen, document.createTextNode(' '), copyBtn);
-        content.append(rowEl);
-      }
-      row.append(content); card.append(row); cards.append(card);
+      row.append(img);
+    } else if (i.missing) {
+      const ph = document.createElement('div');
+      ph.className = 'thumb thumb--placeholder';
+      ph.textContent = 'No scan yet';
+      row.append(ph);
     }
-  }
+
+    const content = document.createElement('div');
+    const h = document.createElement('div');
+    h.className = 'row';
+    h.innerHTML = '<strong>' + title + '</strong>';
+    content.append(h);
+
+    const meta = document.createElement('div');
+    meta.innerHTML = '<div class="row">'
+      + (i.missing ? '<span class="pill pill--missing">Missing</span>' : '')
+      + (i.negative_scan && !i.missing ? '<span class="pill">Neg scan</span>' : '')
+      + (i.negative_sleeve ? '<span class="pill">Sleeve: ' + i.negative_sleeve + '</span>' : '')
+      + (i.frame_number ? '<span class="pill">Frame: ' + i.frame_number + '</span>' : '')
+      + (i.film ? '<span class="pill">Film: ' + i.film + '</span>' : '')
+      + '</div>';
+    content.append(meta);
+
+    if (i.description) {
+      const p = document.createElement('div');
+      p.className = 'row muted';
+      p.textContent = i.description;
+      content.append(p);
+    }
+
+    if (i.file_path && !i.missing) {
+      const rowEl = document.createElement('div');
+      rowEl.className = 'row';
+
+      async function action(cmd, path){
+        try{
+          const res = await fetch('/action', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({cmd, path})
+          });
+          if(!res.ok){
+            const t = await res.text();
+            throw new Error(t || res.status);
+          }
+        }catch(e){
+          alert(`Could not ${cmd}: ${e}`);
+        }
+      }
+
+      const btnReveal = document.createElement('button');
+      btnReveal.className = 'btn';
+      btnReveal.type = 'button';
+      btnReveal.textContent = 'Reveal in Finder';
+      btnReveal.addEventListener('click', ()=> action('reveal', i.file_path));
+
+      const btnOpen = document.createElement('button');
+      btnOpen.className = 'btn';
+      btnOpen.type = 'button';
+      btnOpen.textContent = 'Open file';
+      btnOpen.addEventListener('click', ()=> action('open', i.file_path));
+
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'btn';
+      copyBtn.type = 'button';
+      copyBtn.textContent = 'Copy path';
+      copyBtn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(i.file_path);
+          copyBtn.textContent = 'Copied!';
+          setTimeout(() => (copyBtn.textContent = 'Copy path'), 1000);
+        } catch {}
+      });
+
+      rowEl.append(btnReveal, document.createTextNode(' '), btnOpen, document.createTextNode(' '), copyBtn);
+      content.append(rowEl);
+    }
+
+    // --- highlight currently open card by stable ID ---
+    const key = i.thumb_path || i.file_path || i.print_id || null;
+    if (key && key === lightboxCurrentId) {
+      card.classList.add('card--active');
+    }
+
+    row.append(content);
+    card.append(row);
+    cards.append(card);
+  });
+}
+
   statusSel.addEventListener('change', render);
   viewMode.addEventListener('change', render);
   sortKey.addEventListener('change', render);
@@ -717,13 +853,30 @@ function toFileURL(absPath, opts) {
   function openModal(){ editorBackdrop.style.display='flex'; }
   function closeModal(){ editorBackdrop.style.display='none'; }
 
-  // Prevent closing by clicking the backdrop / Esc
-  editorBackdrop.addEventListener('click', function(e){
-    if (e.target === editorBackdrop) e.stopPropagation();
-  });
+    // ESC + arrow keys: prioritize lightbox, then block closing editor with Esc
   document.addEventListener('keydown', function(e){
-    if (editorBackdrop.style.display === 'flex' && (e.key === 'Escape' || e.key === 'Esc')) {
-      e.preventDefault();
+    if (lightboxBackdrop.style.display === 'flex') {
+      if (e.key === 'Escape' || e.key === 'Esc') {
+        e.preventDefault();
+        closeLightbox();
+        return;
+      }
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        showPrev();
+        return;
+      }
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        showNext();
+        return;
+      }
+    }
+
+    if (e.key === 'Escape' || e.key === 'Esc') {
+      if (editorBackdrop.style.display === 'flex') {
+        e.preventDefault(); // don't let Esc close the editor
+      }
     }
   });
 

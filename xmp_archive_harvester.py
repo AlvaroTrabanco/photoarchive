@@ -321,127 +321,50 @@ def parse_args() -> argparse.Namespace:
                    help="Which items get thumbnails: 'selected' (default) or 'strict' (print_id or negative_sleeve)")
     return p.parse_args()
 
-
-def make_thumbnail(image_path: Path, thumbs_dir: Path, max_px: int,
-                   crop_box: Optional[tuple] = None,
-                   crop_angle: Optional[float] = None,
-                   exif_normalize: bool = True,
-                   exif_orientation: Optional[int] = None,
-                   lr_perspective: Optional[dict] = None) -> Optional[Path]:
+def make_thumbnail(
+    image_path: Path,
+    thumbs_dir: Path,
+    max_px: int,
+) -> Optional[Path]:
     """
-    Build thumbnail reliably:
-      - RAW: decode via sips → JPEG for PIL; apply orientation/crop.
-      - Non-RAW: open directly; if exif_normalize=True, use exif_transpose.
-      - Apply LR Transform (perspective), then crop angle, then normalized crop box.
+    Build a thumbnail with **no** Lightroom crop / transform logic.
+    We assume we're working with already-exported JPGs that look correct.
+
+    Behaviour:
+      - Try `sips -Z` first for speed (macOS).
+      - Fallback to Pillow: open → resize → save.
     """
     try:
         thumbs_dir.mkdir(parents=True, exist_ok=True)
         out = thumbs_dir / (image_path.stem + ".jpg")
 
-        # Fast path (no crop/angle) for non-RAW via sips
-        use_fast_sips = (
-            crop_box is None
-            and (crop_angle is None or abs(crop_angle) < 1e-6)
-            and not lr_perspective  # ← ensure we don’t skip PIL when perspective exists
-        )
-        if use_fast_sips and shutil.which("sips") and image_path.suffix.lower() not in RAW_EXTS:
-            cmd = ["sips", "-Z", str(max_px), image_path.as_posix(),
-                   "--setProperty", "format", "jpeg", "--out", out.as_posix()]
+        # Fast path via sips (only for non-RAW; here we expect JPGs anyway)
+        if shutil.which("sips") and image_path.suffix.lower() not in RAW_EXTS:
+            cmd = [
+                "sips",
+                "-Z",
+                str(max_px),
+                image_path.as_posix(),
+                "--setProperty",
+                "format",
+                "jpeg",
+                "--out",
+                out.as_posix(),
+            ]
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            if res.returncode == 0 and out.exists():
+            if res.returncode == 0 and out.exists() and out.stat().st_size > 0:
                 return out
 
-        # --- Choose a PIL-openable source (decode RAW via sips to a temp JPEG) ---
-        src_for_pil = image_path
-        tmp_created = False
-        if image_path.suffix.lower() in RAW_EXTS:
-            decoded = _decode_raw_to_temp_jpeg_with_sips(image_path, 0)
-            if decoded and decoded.exists():
-                src_for_pil = decoded
-                tmp_created = True
+        # Fallback: Pillow (no EXIF auto-rotation, no crop)
+        with Image.open(image_path.as_posix()) as im:
+            im.thumbnail((max_px, max_px))
+            im.convert("RGB").save(out.as_posix(), "JPEG", quality=85)
 
-        try:
-            with Image.open(src_for_pil.as_posix()) as im:
-                baked_orientation: Optional[int] = None
-
-                # 1) Orientation
-                if exif_normalize:
-                    try:
-                        # read original Orientation tag (0x0112 == 274)
-                        try:
-                            ori_before = im.getexif().get(274)
-                        except Exception:
-                            ori_before = None
-
-                        im2 = ImageOps.exif_transpose(im)
-                        if im2 is not im:
-                            im = im2
-                            if isinstance(ori_before, int) and 2 <= ori_before <= 8:
-                                baked_orientation = ori_before
-                    except Exception:
-                        pass
-                else:
-                    if exif_orientation and exif_orientation != 1:
-                        im = _apply_tiff_orientation(im, exif_orientation)
-                        baked_orientation = exif_orientation
-
-                # 2) Lightroom Transform (manual perspective)
-                if lr_perspective:
-                    im = _apply_manual_perspective(
-                        im,
-                        pv=lr_perspective.get("vertical"),
-                        ph=lr_perspective.get("horizontal"),
-                        px=lr_perspective.get("x"),
-                        py=lr_perspective.get("y"),
-                        pscale=lr_perspective.get("scale"),
-                        paspect=lr_perspective.get("aspect"),
-                        prot=lr_perspective.get("rotate"),
-                    )
-
-                # 3) Apply LR crop angle (LR is clockwise-positive → negate for PIL)
-                if crop_angle is not None:
-                    ca = float(crop_angle)
-                    if abs(ca) > 1e-6:
-                        im = im.rotate(-ca, resample=Image.BICUBIC, expand=False)
-
-                # 4) Crop with normalized box; REMAP if we baked an orientation
-                if crop_box is not None:
-                    eff_orientation = baked_orientation if baked_orientation else None
-                    nL, nT, nR, nB = _map_box_by_orientation(crop_box, eff_orientation)
-
-                    # clamp + order
-                    nL = max(0.0, min(1.0, float(nL)))
-                    nT = max(0.0, min(1.0, float(nT)))
-                    nR = max(0.0, min(1.0, float(nR)))
-                    nB = max(0.0, min(1.0, float(nB)))
-                    if nR < nL: nL, nR = nR, nL
-                    if nB < nT: nT, nB = nB, nT
-
-                    W, H = im.size
-                    L = int(round(nL * W)); T = int(round(nT * H))
-                    R = int(round(nR * W)); B = int(round(nB * H))
-                    L = max(0, min(L, W)); R = max(0, min(R, W))
-                    T = max(0, min(T, H)); B = max(0, min(B, H))
-                    if R > L and B > T:
-                        im = im.crop((L, T, R, B))
-
-                # 5) Resize + save
-                im.thumbnail((max_px, max_px))
-                im.convert("RGB").save(out.as_posix(), "JPEG", quality=85)
-
-            return out if out.exists() else None
-
-        finally:
-            if tmp_created:
-                try:
-                    os.remove(src_for_pil)
-                except Exception:
-                    pass
+        return out if out.exists() else None
 
     except Exception as e:
         logging.debug("make_thumbnail failed for %s: %s", image_path, e)
         return None
-
 def find_associated_image(xmp_path: Path) -> Optional[Path]:
     stem = xmp_path.stem
     parent = xmp_path.parent
@@ -924,7 +847,7 @@ def write_index_html(out_dir: Path) -> None:
 
     BUILD_TAG = "ARCHIVE-HTML v2.4 — grid/list + sort + status + editor + clear filters"
     html = """<!doctype html>
-<!-- __BUILD_TAG__ -->
+<!-- ARCHIVE-HTML v2.4 — grid/list + sort + status + editor + clear filters -->
 <html lang="en">
 <head>
 <meta charset="utf-8"/>
@@ -943,13 +866,14 @@ def write_index_html(out_dir: Path) -> None:
   .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--card-min),1fr));gap:var(--gap)}
   .cards.cards--list{display:flex;flex-direction:column}
   .card{border:1px solid var(--border);border-radius:12px;padding:12px;background:var(--bg)}
+  .card--active{outline:2px solid orange;outline-offset:2px}
   .muted{color:var(--muted);font-size:12px}
   .row{margin:6px 0}
   a{word-break:break-all}
   .pill{display:inline-block;border:1px solid #ccc;border-radius:999px;padding:2px 8px;margin-right:6px;font-size:12px}
   .pill--missing{border-color:#e99;background:#fff4f4;color:#b40000}
   .list-row{display:flex;gap:12px;align-items:flex-start}
-  .thumb{max-width:100%;border-radius:8px;margin-bottom:8px}
+  .thumb{max-width:100%;border-radius:8px;margin-bottom:8px;cursor:pointer}
   .list-row .thumb{max-width:160px}
   .thumb--placeholder{display:flex;align-items:center;justify-content:center;
                       aspect-ratio:4/3;border:2px dashed #ddd;border-radius:8px;background:#fafafa;
@@ -1091,7 +1015,7 @@ def write_index_html(out_dir: Path) -> None:
 
 <div id="cards" class="cards"></div>
 
-<!-- Modal -->
+<!-- Modal: Archive editor -->
 <div id="editorBackdrop" class="modal-backdrop" aria-hidden="true">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="editorTitle">
     <header>
@@ -1116,11 +1040,24 @@ def write_index_html(out_dir: Path) -> None:
   </div>
 </div>
 
+<!-- Lightbox for enlarged photo -->
+<div id="lightboxBackdrop" class="modal-backdrop" aria-hidden="true">
+  <div class="modal" id="lightboxModal" aria-modal="true" role="dialog">
+    <header style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <div>
+        <button id="lightboxPrev" class="btn">&larr; Prev</button>
+        <button id="lightboxNext" class="btn">Next &rarr;</button>
+      </div>
+      <button id="lightboxClose" class="btn">× Close</button>
+    </header>
+    <img id="lightboxImage"
+         alt=""
+         style="max-width:100%;height:auto;display:block;margin:0 auto 4px;" />
+  </div>
+</div>
+
 <script>
-
-
-
-console.log("__BUILD_TAG__ loaded");
+console.log("ARCHIVE-HTML v2.4 — grid/list + sort + status + editor + clear filters loaded");
 
 (async function(){
   // -------- helpers
@@ -1202,7 +1139,10 @@ console.log("__BUILD_TAG__ loaded");
       const out = await res.json();
       if(!out.ok) throw new Error(out.error || 'Helper error');
     }catch(e){
-      alert(`Could not ${action}:\n${e.message}\n\nIs filehelper.py running?`);
+      alert(`Could not ${action}:
+${e.message}
+
+Is filehelper.py running?`);
     }
   }
 
@@ -1214,85 +1154,84 @@ console.log("__BUILD_TAG__ loaded");
   setCount(totalCount); // initial: before any filters apply
 
   // Backfill + normalize fields for the UI
-  // Backfill + normalize fields for the UI
-for (const i of items) {
-  // Treat negative scans as "Missing"
-  if (i.negative_scan) i.missing = true;
+  for (const i of items) {
+    // Treat negative scans as "Missing"
+    if (i.negative_scan) i.missing = true;
 
-  // Build a token pool
-  const pool = []
-    .concat(Array.isArray(i.keywords_list) ? i.keywords_list : [])
-    .concat((i.keywords_text || '').split(/[;,]/))
-    .concat((i.hierarchical_keywords || '').split(/[;]+/)); // keep pipe groups intact for parsing
+    // Build a token pool
+    const pool = []
+      .concat(Array.isArray(i.keywords_list) ? i.keywords_list : [])
+      .concat((i.keywords_text || '').split(/[;,]/))
+      .concat((i.hierarchical_keywords || '').split(/[;]+/)); // keep pipe groups intact for parsing
 
-  // 1) From hierarchical paths like "Archive|Film|Kodak Tri-X 400"
-  if (!i.film || !i.negative_sleeve || !i.frame_number) {
-    for (const raw of (i.hierarchical_keywords || '').split(/[;]+/)) {
-      const parts = String(raw || '').split('|').map(s => s.trim()).filter(Boolean);
-      const idxFilm = parts.findIndex(p => /^film$/i.test(p));
-      if (!i.film && idxFilm >= 0 && parts[idxFilm + 1]) {
-        i.film = parts.slice(idxFilm + 1).join(' | '); // keep full remainder if nested
+    // 1) From hierarchical paths like "Archive|Film|Kodak Tri-X 400"
+    if (!i.film || !i.negative_sleeve || !i.frame_number) {
+      for (const raw of (i.hierarchical_keywords || '').split(/[;]+/)) {
+        const parts = String(raw || '').split('|').map(s => s.trim()).filter(Boolean);
+        const idxFilm = parts.findIndex(p => /^film$/i.test(p));
+        if (!i.film && idxFilm >= 0 && parts[idxFilm + 1]) {
+          i.film = parts.slice(idxFilm + 1).join(' | '); // keep full remainder if nested
+        }
+        const idxSleeve = parts.findIndex(p => /^(negative)?sleeve$/i.test(p) || /^negative\s*sleeve$/i.test(p));
+        if (!i.negative_sleeve && idxSleeve >= 0 && parts[idxSleeve + 1]) {
+          i.negative_sleeve = parts[idxSleeve + 1];
+        }
+        const idxFrame = parts.findIndex(p => /^frame$/i.test(p));
+        if (!i.frame_number && idxFrame >= 0 && parts[idxFrame + 1]) {
+          i.frame_number = parts[idxFrame + 1];
+        }
       }
-      const idxSleeve = parts.findIndex(p => /^(negative)?sleeve$/i.test(p) || /^negative\s*sleeve$/i.test(p));
-      if (!i.negative_sleeve && idxSleeve >= 0 && parts[idxSleeve + 1]) {
-        i.negative_sleeve = parts[idxSleeve + 1];
-      }
-      const idxFrame = parts.findIndex(p => /^frame$/i.test(p));
-      if (!i.frame_number && idxFrame >= 0 && parts[idxFrame + 1]) {
-        i.frame_number = parts[idxFrame + 1];
+    }
+
+    // 2) Fallbacks from flat tokens like "Frame:5" or "NegativeSleeve:57"
+    if (!i.film || !i.negative_sleeve || !i.frame_number) {
+      for (const raw of pool) {
+        const t = String(raw || '').trim();
+        if (!i.film) {
+          const mFilm = t.match(/^(?:film[:=]\s*)(.+)$/i);
+          if (mFilm) i.film = mFilm[1].trim();
+        }
+        if (!i.negative_sleeve) {
+          const mSleeve = t.match(/^(?:neg(?:ative)?[_\s-]?sleeve|sleeve)\s*[:=]\s*([A-Za-z0-9._ -]+)$/i);
+          if (mSleeve) i.negative_sleeve = mSleeve[1].trim();
+        }
+        if (!i.frame_number) {
+          const mFrame = t.match(/^frame\s*[:=]\s*([A-Za-z0-9._ -]+)$/i);
+          if (mFrame) i.frame_number = mFrame[1].trim();
+        }
       }
     }
   }
 
-  // 2) Fallbacks from flat tokens like "Frame:5" or "NegativeSleeve:57"
-  if (!i.film || !i.negative_sleeve || !i.frame_number) {
-    for (const raw of pool) {
-      const t = String(raw || '').trim();
-      if (!i.film) {
-        const mFilm = t.match(/^(?:film[:=]\s*)(.+)$/i);
-        if (mFilm) i.film = mFilm[1].trim();
-      }
-      if (!i.negative_sleeve) {
-        const mSleeve = t.match(/^(?:neg(?:ative)?[_\s-]?sleeve|sleeve)\s*[:=]\s*([A-Za-z0-9._ -]+)$/i);
-        if (mSleeve) i.negative_sleeve = mSleeve[1].trim();
-      }
-      if (!i.frame_number) {
-        const mFrame = t.match(/^frame\s*[:=]\s*([A-Za-z0-9._ -]+)$/i);
-        if (mFrame) i.frame_number = mFrame[1].trim();
+  // Ensure every real item gets a series_id from its print_id prefix
+  (function assignSeriesIds(){
+    const defs = (registry.series || []);
+    function idOrPrefix(s){ return (s.id && String(s.id).trim()) || (s.prefix || ''); }
+    for (const it of items){
+      if (it.series_id || !it.print_id) continue;
+      const pid = String(it.print_id);
+      for (const s of defs){
+        const pref = idOrPrefix(s);
+        if (pref && pid.startsWith(pref)){
+          it.series_id = idOrPrefix(s);
+          break;
+        }
       }
     }
+  })();
+
+  function toFileURL(absPath, opts) {
+    opts = opts || {};
+    var folder = !!opts.folder;
+
+    if (!absPath) return "";
+    // Windows-safe: convert backslashes → slashes without regex pitfalls
+    var p = String(absPath).split("\\").join("/");
+
+    if (folder) p = p.replace(/\/[^\/]+$/, "/");   // strip filename → keep trailing slash
+    if (!p.startsWith("/")) p = "/" + p;           // ensure leading slash
+    return "file://" + encodeURI(p);               // file:///… (properly encoded)
   }
-}
-
-// Ensure every real item gets a series_id from its print_id prefix
-(function assignSeriesIds(){
-  const defs = (registry.series || []);
-  function idOrPrefix(s){ return (s.id && String(s.id).trim()) || (s.prefix || ''); }
-  for (const it of items){
-    if (it.series_id || !it.print_id) continue;
-    const pid = String(it.print_id);
-    for (const s of defs){
-      const pref = idOrPrefix(s);
-      if (pref && pid.startsWith(pref)){
-        it.series_id = idOrPrefix(s);
-        break;
-      }
-    }
-  }
-})();
-
-function toFileURL(absPath, opts) {
-  opts = opts || {};
-  var folder = !!opts.folder;
-
-  if (!absPath) return "";
-  // Windows-safe: convert backslashes → slashes without regex pitfalls
-  var p = String(absPath).split("\\\\").join("/");
-
-  if (folder) p = p.replace(/\/[^\/]+$/, "/");   // strip filename → keep trailing slash
-  if (!p.startsWith("/")) p = "/" + p;           // ensure leading slash
-  return "file://" + encodeURI(p);               // file:///… (properly encoded)
-}
 
   // -------- UI references
   const $ = s => document.querySelector(s);
@@ -1306,6 +1245,77 @@ function toFileURL(absPath, opts) {
   const toggleThumbsBtn = $('#toggleThumbs');
   const zoom = $('#zoom');
   const clearFiltersBtn = $('#clearFilters');
+    // Lightbox state
+  let lightboxCurrentIndex = -1;
+
+    // Lightbox DOM
+  const lightboxBackdrop = document.getElementById('lightboxBackdrop');
+  const lightboxImage = document.getElementById('lightboxImage');
+  const lightboxClose = document.getElementById('lightboxClose');
+  const lightboxPrev = document.getElementById('lightboxPrev');
+  const lightboxNext = document.getElementById('lightboxNext');
+
+  // Will hold the currently rendered (filtered+sorted) list
+  let lightboxItems = [];
+  let lightboxIndex = -1;
+
+  function highlightActiveCard() {
+    const prev = document.querySelector('.card--active');
+    if (prev) prev.classList.remove('card--active');
+    if (lightboxIndex < 0) return;
+    const cardEl = cards.children[lightboxIndex];
+    if (cardEl) cardEl.classList.add('card--active');
+  }
+
+  function openLightboxForIndex(idx) {
+    if (!lightboxItems || !lightboxItems.length) return;
+    if (idx < 0 || idx >= lightboxItems.length) return;
+    lightboxIndex = idx;
+
+    const item = lightboxItems[lightboxIndex];
+    const title = (item.print_id || item.title || 'Untitled');
+    const src = item.thumb_path ? (item.thumb_path + '?ts=' + Date.now()) : '';
+
+    if (!src) return;
+
+    lightboxImage.src = src;
+    lightboxImage.alt = title;
+    lightboxBackdrop.style.display = 'flex';
+    lightboxBackdrop.setAttribute('aria-hidden', 'false');
+
+    highlightActiveCard();
+  }
+
+  function closeLightbox() {
+    lightboxBackdrop.style.display = 'none';
+    lightboxBackdrop.setAttribute('aria-hidden', 'true');
+    lightboxImage.src = '';
+    lightboxIndex = -1;
+    const prev = document.querySelector('.card--active');
+    if (prev) prev.classList.remove('card--active');
+  }
+
+  function showPrev() {
+    if (lightboxIndex <= 0) return;
+    openLightboxForIndex(lightboxIndex - 1);
+  }
+
+  function showNext() {
+    if (lightboxItems && lightboxIndex >= 0 && lightboxIndex < lightboxItems.length - 1) {
+      openLightboxForIndex(lightboxIndex + 1);
+    }
+  }
+
+  lightboxClose.addEventListener('click', closeLightbox);
+  lightboxPrev.addEventListener('click', showPrev);
+  lightboxNext.addEventListener('click', showNext);
+
+  // Click outside the modal closes the lightbox
+  lightboxBackdrop.addEventListener('click', (e) => {
+    if (e.target === lightboxBackdrop) {
+      closeLightbox();
+    }
+  });
 
   // film & sleeves & series multiselect DOM
   const filmMs = $('#filmMs'), filmMsBtn = $('#filmMsBtn'), filmMsPop = $('#filmMsPop'),
@@ -1515,89 +1525,132 @@ function toFileURL(absPath, opts) {
       return collator.compare(A,B);
     });
   }
-  function render(){
-    cards.classList.toggle('cards--list', viewMode.value==='list');
-    const filtered = sortItems(items.filter(matches));
-    setCount(filtered.length);
-    cards.innerHTML='';
-    for(const i of filtered){
-      const card=document.createElement('div'); card.className='card';
-      const title=(i.print_id || i.title || 'Untitled');
-      const row=document.createElement('div'); if(viewMode.value==='list') row.className='list-row';
+  
+function render(){
+  cards.classList.toggle('cards--list', viewMode.value === 'list');
+  const filtered = sortItems(items.filter(matches));
+  setCount(filtered.length);
+  cards.innerHTML = '';
 
-      if(i.thumb_path){
-        const img=document.createElement('img'); img.className='thumb';
-        img.src=i.thumb_path+'?ts='+Date.now(); img.alt=title;
-        img.style.display=showThumbs?'block':'none'; row.append(img);
-      } else if(i.missing){
-        const ph=document.createElement('div'); ph.className='thumb thumb--placeholder';
-        ph.textContent='No scan yet'; row.append(ph);
-      }
+  // Build lightboxItems as "only items with thumbs", in the same visual order
+  lightboxItems = filtered.filter(i => i.thumb_path);
 
-      const content=document.createElement('div');
-      const h=document.createElement('div'); h.className='row'; h.innerHTML='<strong>'+title+'</strong>'; content.append(h);
+  let thumbIndex = 0; // index inside lightboxItems
 
-      const meta=document.createElement('div');
-      meta.innerHTML = '<div class="row">'
-        + (i.missing ? '<span class="pill pill--missing">Missing</span>' : '')
-        + (i.negative_scan && !i.missing ? '<span class="pill">Neg scan</span>' : '')
-        + (i.negative_sleeve ? '<span class="pill">Sleeve: '+i.negative_sleeve+'</span>' : '')
-        + (i.frame_number ? '<span class="pill">Frame: '+i.frame_number+'</span>' : '')
-        + (i.film ? '<span class="pill">Film: '+i.film+'</span>' : '')
-        + '</div>';
-      content.append(meta);
+  filtered.forEach((i) => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    const title = (i.print_id || i.title || 'Untitled');
+    const row = document.createElement('div');
+    if (viewMode.value === 'list') row.className = 'list-row';
 
-      if(i.description){ const p=document.createElement('div'); p.className='row muted'; p.textContent=i.description; content.append(p); }
-      if (i.file_path && !i.missing) {
-        const rowEl = document.createElement('div');
-        rowEl.className = 'row';
+    let thisLightboxIndex = -1;
 
-        async function action(cmd, path){
-          try{
-            const res = await fetch('/action', {
-              method: 'POST',
-              headers: {'Content-Type':'application/json'},
-              body: JSON.stringify({cmd, path})
-            });
-            if(!res.ok){
-              const t = await res.text();
-              throw new Error(t || res.status);
-            }
-          }catch(e){
-            alert(`Could not ${cmd}: ${e}`);
-          }
-        }
+    if (i.thumb_path) {
+      const img = document.createElement('img');
+      img.className = 'thumb';
+      img.src = i.thumb_path + '?ts=' + Date.now();
+      img.alt = title;
+      img.style.display = showThumbs ? 'block' : 'none';
 
-        const btnReveal = document.createElement('button');
-        btnReveal.className = 'btn';
-        btnReveal.type = 'button';
-        btnReveal.textContent = 'Reveal in Finder';
-        btnReveal.addEventListener('click', ()=> action('reveal', i.file_path));
+      // this card corresponds to lightboxItems[thumbIndex]
+      thisLightboxIndex = thumbIndex;
 
-        const btnOpen = document.createElement('button');
-        btnOpen.className = 'btn';
-        btnOpen.type = 'button';
-        btnOpen.textContent = 'Open file';
-        btnOpen.addEventListener('click', ()=> action('open', i.file_path));
+      // open lightbox at this index (in the thumbs-only list)
+      img.addEventListener('click', () => {
+        openLightboxForIndex(thisLightboxIndex);
+      });
 
-        const copyBtn = document.createElement('button');
-        copyBtn.className = 'btn';
-        copyBtn.type = 'button';
-        copyBtn.textContent = 'Copy path';
-        copyBtn.addEventListener('click', async () => {
-          try {
-            await navigator.clipboard.writeText(i.file_path);
-            copyBtn.textContent = 'Copied!';
-            setTimeout(() => (copyBtn.textContent = 'Copy path'), 1000);
-          } catch {}
-        });
-
-        rowEl.append(btnReveal, document.createTextNode(' '), btnOpen, document.createTextNode(' '), copyBtn);
-        content.append(rowEl);
-      }
-      row.append(content); card.append(row); cards.append(card);
+      thumbIndex += 1;
+      row.append(img);
+    } else if (i.missing) {
+      const ph = document.createElement('div');
+      ph.className = 'thumb thumb--placeholder';
+      ph.textContent = 'No scan yet';
+      row.append(ph);
     }
-  }
+
+    const content = document.createElement('div');
+    const h = document.createElement('div');
+    h.className = 'row';
+    h.innerHTML = '<strong>' + title + '</strong>';
+    content.append(h);
+
+    const meta = document.createElement('div');
+    meta.innerHTML = '<div class="row">'
+      + (i.missing ? '<span class="pill pill--missing">Missing</span>' : '')
+      + (i.negative_scan && !i.missing ? '<span class="pill">Neg scan</span>' : '')
+      + (i.negative_sleeve ? '<span class="pill">Sleeve: ' + i.negative_sleeve + '</span>' : '')
+      + (i.frame_number ? '<span class="pill">Frame: ' + i.frame_number + '</span>' : '')
+      + (i.film ? '<span class="pill">Film: ' + i.film + '</span>' : '')
+      + '</div>';
+    content.append(meta);
+
+    if (i.description) {
+      const p = document.createElement('div');
+      p.className = 'row muted';
+      p.textContent = i.description;
+      content.append(p);
+    }
+
+    if (i.file_path && !i.missing) {
+      const rowEl = document.createElement('div');
+      rowEl.className = 'row';
+
+      async function action(cmd, path){
+        try{
+          const res = await fetch('/action', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({cmd, path})
+          });
+          if(!res.ok){
+            const t = await res.text();
+            throw new Error(t || res.status);
+          }
+        }catch(e){
+          alert(`Could not ${cmd}: ${e}`);
+        }
+      }
+
+      const btnReveal = document.createElement('button');
+      btnReveal.className = 'btn';
+      btnReveal.type = 'button';
+      btnReveal.textContent = 'Reveal in Finder';
+      btnReveal.addEventListener('click', ()=> action('reveal', i.file_path));
+
+      const btnOpen = document.createElement('button');
+      btnOpen.className = 'btn';
+      btnOpen.type = 'button';
+      btnOpen.textContent = 'Open file';
+      btnOpen.addEventListener('click', ()=> action('open', i.file_path));
+
+      const copyBtn = document.createElement('button');
+      copyBtn.className = 'btn';
+      copyBtn.type = 'button';
+      copyBtn.textContent = 'Copy path';
+      copyBtn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(i.file_path);
+          copyBtn.textContent = 'Copied!';
+          setTimeout(() => (copyBtn.textContent = 'Copy path'), 1000);
+        } catch {}
+      });
+
+      rowEl.append(btnReveal, document.createTextNode(' '), btnOpen, document.createTextNode(' '), copyBtn);
+      content.append(rowEl);
+    }
+
+    // highlight card if it’s the currently open lightbox image
+    if (thisLightboxIndex !== -1 && thisLightboxIndex === lightboxCurrentIndex) {
+      card.classList.add('card--active');
+    }
+
+    row.append(content);
+    card.append(row);
+    cards.append(card);
+  });
+}
   statusSel.addEventListener('change', render);
   viewMode.addEventListener('change', render);
   sortKey.addEventListener('change', render);
@@ -1639,13 +1692,30 @@ function toFileURL(absPath, opts) {
   function openModal(){ editorBackdrop.style.display='flex'; }
   function closeModal(){ editorBackdrop.style.display='none'; }
 
-  // Prevent closing by clicking the backdrop / Esc
-  editorBackdrop.addEventListener('click', function(e){
-    if (e.target === editorBackdrop) e.stopPropagation();
-  });
+    // ESC + arrow keys: prioritize lightbox, then block closing editor with Esc
   document.addEventListener('keydown', function(e){
-    if (editorBackdrop.style.display === 'flex' && (e.key === 'Escape' || e.key === 'Esc')) {
-      e.preventDefault();
+    if (lightboxBackdrop.style.display === 'flex') {
+      if (e.key === 'Escape' || e.key === 'Esc') {
+        e.preventDefault();
+        closeLightbox();
+        return;
+      }
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        showPrev();
+        return;
+      }
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        showNext();
+        return;
+      }
+    }
+
+    if (e.key === 'Escape' || e.key === 'Esc') {
+      if (editorBackdrop.style.display === 'flex') {
+        e.preventDefault(); // don't let Esc close the editor
+      }
     }
   });
 
@@ -1954,76 +2024,42 @@ def main():
         else:
             thumb_candidates = list(selected)
 
-        todo = []
-        already = 0
-        for r in thumb_candidates:
-            if not r.file_path:
-                continue
-            p = Path(r.file_path)
-            if not p.exists():
-                continue
+            todo = []
+            already = 0
+            for r in thumb_candidates:
+                if not r.file_path:
+                    continue
+                p = Path(r.file_path)
+                if not p.exists():
+                    continue
 
-            out_thumb = thumbs_dir / (p.stem + ".jpg")
-            if out_thumb.exists():
-                r.thumb_path = f"thumbs/{out_thumb.name}"
-                already += 1
-                continue
+                out_thumb = thumbs_dir / (p.stem + ".jpg")
+                if out_thumb.exists():
+                    r.thumb_path = f"thumbs/{out_thumb.name}"
+                    already += 1
+                    continue
 
-            # Keep crop box normalized (0..1) — let make_thumbnail do rotation + cropping
-            crop_box = None
-            if (r.crop_left is not None and r.crop_top is not None and
-                r.crop_right is not None and r.crop_bottom is not None):
-                nl = max(0.0, min(1.0, float(r.crop_left)))
-                nt = max(0.0, min(1.0, float(r.crop_top)))
-                nr = max(0.0, min(1.0, float(r.crop_right)))
-                nb = max(0.0, min(1.0, float(r.crop_bottom)))
-                if nr > nl and nb > nt:
-                    crop_box = (nl, nt, nr, nb)
+                # queue work item – no crop / angle / perspective anymore
+                todo.append((r, p, out_thumb))
 
-            # Build LR perspective dict (only if any slider exists)
-            lr_persp = None
-            if any(v is not None for v in (
-                r.persp_vertical, r.persp_horizontal, r.persp_rotate,
-                r.persp_scale, r.persp_aspect, r.persp_x, r.persp_y
-            )):
-                lr_persp = {
-                    "vertical":   r.persp_vertical,
-                    "horizontal": r.persp_horizontal,
-                    "rotate":     r.persp_rotate,
-                    "scale":      r.persp_scale,
-                    "aspect":     r.persp_aspect,
-                    "x":          r.persp_x,
-                    "y":          r.persp_y,
-                }
-
-            # queue work item (include lr_persp)
-            todo.append((r, p, out_thumb, crop_box, r.crop_angle, lr_persp))
-
-        total = len(todo)
-        logging.info(
-            "Generating thumbnails (scope=%s): %d to build, %d already present",
-            args.thumbs_scope, total, already
-        )
-
-        done = 0
-        last_print = 0.0
-        for r, p, out_thumb, crop_box, crop_angle, lr_persp in todo:
-            t = make_thumbnail(
-                p, thumbs_dir, args.thumb_size,
-                crop_box=crop_box,
-                crop_angle=crop_angle,
-                exif_normalize=r.exif_normalize_for_crop,
-                exif_orientation=r.exif_orientation,
-                lr_perspective=lr_persp,   # ← pass perspective to apply LR Transform
+            total = len(todo)
+            logging.info(
+                "Generating thumbnails (scope=%s): %d to build, %d already present",
+                args.thumbs_scope, total, already
             )
-            done += 1
-            if t:
-                r.thumb_path = f"thumbs/{out_thumb.name}"
-            now = time.time()
-            if (now - last_print) >= 0.5 or done == total:
-                pct = (done / total * 100) if total else 100.0
-                print(f"\r  → {done}/{total} ({pct:.1f}%)", end="", flush=True)
-                last_print = now
+
+            done = 0
+            last_print = 0.0
+            for r, p, out_thumb in todo:
+                t = make_thumbnail(p, thumbs_dir, args.thumb_size)
+                done += 1
+                if t:
+                    r.thumb_path = f"thumbs/{out_thumb.name}"
+                now = time.time()
+                if (now - last_print) >= 0.5 or done == total:
+                    pct = (done / total * 100) if total else 100.0
+                    print(f"\r  → {done}/{total} ({pct:.1f}%)", end="", flush=True)
+                    last_print = now
         if total:
             print()
         logging.info("Thumbnails complete.")
