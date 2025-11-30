@@ -159,6 +159,9 @@
   <button id="toggleThumbs">Hide thumbnails</button>
   <button id="clearFilters" class="btn">Clear filters</button>
   <button id="openEditor" class="btn">Edit archive…</button>
+
+  <button id="openEditor" class="btn">Edit archive…</button>
+  <span id="archiveCount" class="muted" style="margin-left:auto">0/0</span>
 </header>
 
 <div id="cards" class="cards"></div>
@@ -189,6 +192,9 @@
 </div>
 
 <script>
+
+
+
 console.log("ARCHIVE-HTML v2.4 — grid/list + sort + status + editor + clear filters loaded");
 
 (async function(){
@@ -260,7 +266,30 @@ console.log("ARCHIVE-HTML v2.4 — grid/list + sort + status + editor + clear fi
     }
   }
 
+  const HELPER_URL = "http://127.0.0.1:8787";
+  async function helper(action, absPath){
+    try{
+      const res = await fetch(`${HELPER_URL}/api/${action}`, {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({path: absPath})
+      });
+      const out = await res.json();
+      if(!out.ok) throw new Error(out.error || 'Helper error');
+    }catch(e){
+      alert(`Could not ${action}:
+${e.message}
+
+Is filehelper.py running?`);
+    }
+  }
+
   const items = catalog.concat(placeholders);
+
+  const totalCount = items.length;
+  const countEl = document.getElementById('archiveCount');
+  function setCount(n){ if(countEl) countEl.textContent = `${n}/${totalCount}`; }
+  setCount(totalCount); // initial: before any filters apply
 
   // Backfill + normalize fields for the UI
   // Backfill + normalize fields for the UI
@@ -329,6 +358,19 @@ for (const i of items) {
     }
   }
 })();
+
+function toFileURL(absPath, opts) {
+  opts = opts || {};
+  var folder = !!opts.folder;
+
+  if (!absPath) return "";
+  // Windows-safe: convert backslashes → slashes without regex pitfalls
+  var p = String(absPath).split("\\").join("/");
+
+  if (folder) p = p.replace(/\/[^\/]+$/, "/");   // strip filename → keep trailing slash
+  if (!p.startsWith("/")) p = "/" + p;           // ensure leading slash
+  return "file://" + encodeURI(p);               // file:///… (properly encoded)
+}
 
   // -------- UI references
   const $ = s => document.querySelector(s);
@@ -541,17 +583,20 @@ for (const i of items) {
     return true;
   }
 
+  // --- Smarter natural sort (handles 2022-1, 2022-10, 2022-2 correctly) ---
   function sortItems(arr){
-    const key=sortKey.value;
+    const key = sortKey.value;
+    const collator = new Intl.Collator(undefined, {numeric:true, sensitivity:'base'});
     return arr.slice().sort((a,b)=>{
-      const A = String(((a && a[key] != null) ? a[key] : '')).toLowerCase();
-      const B = String(((b && b[key] != null) ? b[key] : '')).toLowerCase();
-      return A<B?-1:A>B?1:0;
+      const A = (a && a[key]) ? String(a[key]).toLowerCase() : '';
+      const B = (b && b[key]) ? String(b[key]).toLowerCase() : '';
+      return collator.compare(A,B);
     });
   }
   function render(){
     cards.classList.toggle('cards--list', viewMode.value==='list');
     const filtered = sortItems(items.filter(matches));
+    setCount(filtered.length);
     cards.innerHTML='';
     for(const i of filtered){
       const card=document.createElement('div'); card.className='card';
@@ -581,8 +626,53 @@ for (const i of items) {
       content.append(meta);
 
       if(i.description){ const p=document.createElement('div'); p.className='row muted'; p.textContent=i.description; content.append(p); }
-      if(i.file_path && !i.missing){ const link=document.createElement('a'); link.href=i.file_path; link.textContent='Local file path'; link.target='_blank'; content.append(link); }
+      if (i.file_path && !i.missing) {
+        const rowEl = document.createElement('div');
+        rowEl.className = 'row';
 
+        async function action(cmd, path){
+          try{
+            const res = await fetch('/action', {
+              method: 'POST',
+              headers: {'Content-Type':'application/json'},
+              body: JSON.stringify({cmd, path})
+            });
+            if(!res.ok){
+              const t = await res.text();
+              throw new Error(t || res.status);
+            }
+          }catch(e){
+            alert(`Could not ${cmd}: ${e}`);
+          }
+        }
+
+        const btnReveal = document.createElement('button');
+        btnReveal.className = 'btn';
+        btnReveal.type = 'button';
+        btnReveal.textContent = 'Reveal in Finder';
+        btnReveal.addEventListener('click', ()=> action('reveal', i.file_path));
+
+        const btnOpen = document.createElement('button');
+        btnOpen.className = 'btn';
+        btnOpen.type = 'button';
+        btnOpen.textContent = 'Open file';
+        btnOpen.addEventListener('click', ()=> action('open', i.file_path));
+
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'btn';
+        copyBtn.type = 'button';
+        copyBtn.textContent = 'Copy path';
+        copyBtn.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(i.file_path);
+            copyBtn.textContent = 'Copied!';
+            setTimeout(() => (copyBtn.textContent = 'Copy path'), 1000);
+          } catch {}
+        });
+
+        rowEl.append(btnReveal, document.createTextNode(' '), btnOpen, document.createTextNode(' '), copyBtn);
+        content.append(rowEl);
+      }
       row.append(content); card.append(row); cards.append(card);
     }
   }

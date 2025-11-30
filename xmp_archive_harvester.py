@@ -28,6 +28,25 @@ import subprocess, shutil
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
+import tempfile
+
+def _decode_raw_to_temp_jpeg_with_sips(src: Path, max_edge: int = 0) -> Optional[Path]:
+    if not shutil.which("sips"):
+        return None
+    try:
+        tmpdir = Path(tempfile.gettempdir())
+        tmp = tmpdir / (src.stem + ".sips.jpg")
+        cmd = ["sips", src.as_posix(), "--setProperty", "format", "jpeg", "--out", tmp.as_posix()]
+        if max_edge and max_edge > 0:
+            cmd[1:1] = ["-Z", str(max_edge)]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if res.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+            return tmp
+    except Exception:
+        pass
+    return None
+
+from PIL import Image, ImageOps
 
 # -------------------- config & helpers --------------------
 
@@ -38,11 +57,168 @@ NS = {
     "lr": "http://ns.adobe.com/lightroom/1.0/",
     "xmp": "http://ns.adobe.com/xap/1.0/",
     "crs": "http://ns.adobe.com/camera-raw-settings/1.0/",
+    "tiff": "http://ns.adobe.com/tiff/1.0/",
 }
 
 IMAGE_EXTS = [
-    ".jpg", ".jpeg", ".tif", ".tiff", ".dng", ".nef", ".cr2", ".cr3", ".arw", ".orf", ".raf"
+    ".jpg", ".jpeg", ".tif", ".tiff", ".dng", ".nef", ".cr2", ".cr3", ".arw", ".orf", ".raf", ".rw2"
 ]
+
+# RAW formats we need to decode via sips for reliable orientation/crops
+RAW_EXTS = {'.nef', '.cr2', '.cr3', '.arw', '.orf', '.raf', '.rw2', '.dng'}
+
+def _apply_tiff_orientation(img: Image.Image, orientation: Optional[int]) -> Image.Image:
+    """
+    Apply TIFF/EXIF Orientation (1..8).
+    1=normal, 2=mirror-H, 3=180, 4=mirror-V, 5=transpose, 6=90 CW, 7=transverse, 8=90 CCW
+    """
+    if not orientation or orientation == 1:
+        return img
+    try:
+        if   orientation == 2: return img.transpose(Image.FLIP_LEFT_RIGHT)
+        elif orientation == 3: return img.transpose(Image.ROTATE_180)
+        elif orientation == 4: return img.transpose(Image.FLIP_TOP_BOTTOM)
+        elif orientation == 5: return img.transpose(Image.TRANSPOSE)
+        elif orientation == 6: return img.transpose(Image.ROTATE_270)  # 90 CW
+        elif orientation == 7: return img.transpose(Image.TRANSVERSE)
+        elif orientation == 8: return img.transpose(Image.ROTATE_90)   # 90 CCW
+    except Exception:
+        return img
+    return img
+
+
+
+from math import radians, sin, cos
+
+def _apply_manual_perspective(im: Image.Image,
+                              pv: Optional[float], ph: Optional[float],
+                              px: Optional[float], py: Optional[float],
+                              pscale: Optional[float], paspect: Optional[float],
+                              prot: Optional[float]) -> Image.Image:
+    """
+    Approximate LR Manual Transform with a projective 'quad' mapping.
+    This is heuristic, aimed at thumbnails; tweak KEYSTONE_STRENGTH to match taste.
+    Order: keystone (pv/ph) → aspect/scale → offset → rotate (small).
+    """
+    W, H = im.size
+    if W < 2 or H < 2:
+        return im
+
+    # Normalize sliders to [-1,1] where applicable
+    def norm100(v): return None if v is None else (max(-100.0, min(100.0, v)) / 100.0)
+    n_pv = norm100(pv)
+    n_ph = norm100(ph)
+    n_px = norm100(px)
+    n_py = norm100(py)
+    n_as = norm100(paspect)
+
+    # Scale (% → factor). Default 100 → 1.0
+    s = 1.0
+    if pscale is not None:
+        try:
+            s = float(pscale) / 100.0
+        except Exception:
+            s = 1.0
+        s = max(0.01, min(4.0, s))
+
+    # Heuristic strengths (tune these):
+    KEYSTONE_STRENGTH = 0.40   # how aggressively pv/ph pinch the trapezoid
+    SHIFT_PIXELS = 0.20        # fraction of half-size for X/Y shifts at 100
+
+    # Base quad is full image rectangle in source (UL, LL, LR, UR) — order for QUAD:
+    # Pillow's QUAD expects: (UL, LL, LR, UR) in source coords.
+    ul = [0.0, 0.0]
+    ll = [0.0, float(H)]
+    lr = [float(W), float(H)]
+    ur = [float(W), 0.0]
+
+    # Apply vertical keystone: move top inward/outward symmetrically
+    if n_pv is not None and abs(n_pv) > 1e-6:
+        ax = (W * KEYSTONE_STRENGTH) * n_pv
+        ul[0] += ax
+        ur[0] -= ax
+
+    # Apply horizontal keystone: move left/right vertically in opposite directions
+    if n_ph is not None and abs(n_ph) > 1e-6:
+        ay = (H * KEYSTONE_STRENGTH) * n_ph
+        ul[1] += ay
+        ll[1] -= ay
+        ur[1] -= ay
+        lr[1] += ay
+
+    # Aspect (LR's slider stretches/compresses width vs height a bit).
+    # Positive aspect: widen; negative: tighten.
+    if n_as is not None and abs(n_as) > 1e-6:
+        k = 1.0 + 0.25 * n_as  # gentle ±25%
+        cx, cy = W * 0.5, H * 0.5
+        for p in (ul, ll, lr, ur):
+            p[0] = cx + (p[0] - cx) * k
+
+    # Scale about center
+    if abs(s - 1.0) > 1e-6:
+        cx, cy = W * 0.5, H * 0.5
+        for p in (ul, ll, lr, ur):
+            p[0] = cx + (p[0] - cx) * s
+            p[1] = cy + (p[1] - cy) * s
+
+    # Shifts (X/Y) in percent of half-size
+    if n_px is not None and abs(n_px) > 1e-6:
+        dx = (W * 0.5) * SHIFT_PIXELS * n_px
+        for p in (ul, ll, lr, ur): p[0] += dx
+    if n_py is not None and abs(n_py) > 1e-6:
+        dy = (H * 0.5) * SHIFT_PIXELS * n_py
+        for p in (ul, ll, lr, ur): p[1] += dy
+
+    # Small extra rotate (Transform panel's rotate; often redundant with CropAngle)
+    if prot is not None and abs(prot) > 1e-6:
+        th = radians(float(prot))
+        c, s_ = cos(th), sin(th)
+        cx, cy = W * 0.5, H * 0.5
+        def rot(p):
+            x, y = p
+            x0, y0 = x - cx, y - cy
+            return [cx + x0 * c - y0 * s_, cy + x0 * s_ + y0 * c]
+        ul = rot(ul); ll = rot(ll); lr = rot(lr); ur = rot(ur)
+
+    # Perform projective mapping: map this source quad to a rectangle of same size.
+    quad = tuple(ul + ll + lr + ur)
+    return im.transform((W, H), Image.QUAD, quad, resample=Image.BICUBIC)
+
+
+def _map_box_by_orientation(box, orientation):
+    """Map normalized (L,T,R,B) into the coordinate system after applying
+    a TIFF/EXIF orientation. Returns a normalized box with L<=R, T<=B."""
+    if not box or not orientation or orientation == 1:
+        return box
+    L, T, R, B = map(float, box)
+
+    def order(x1, x2): 
+        return (min(x1, x2), max(x1, x2))
+
+    # mapping formulas on normalized [0..1] coordinates
+    if orientation == 2:     # mirror horizontal
+        L, R = 1-R, 1-L
+    elif orientation == 3:   # rotate 180
+        L, R = 1-R, 1-L
+        T, B = 1-B, 1-T
+    elif orientation == 4:   # mirror vertical
+        T, B = 1-B, 1-T
+    elif orientation == 5:   # transpose (flip across main diagonal): (x,y)->(y,x)
+        L, T, R, B = T, L, B, R
+    elif orientation == 6:   # 90 CW: (x,y)->(y,1-x)
+        L, T, R, B = T, 1-R, B, 1-L
+    elif orientation == 7:   # transverse (flip across anti-diagonal): (x,y)->(1-y,1-x)
+        L, T, R, B = 1-B, 1-R, 1-T, 1-L
+    elif orientation == 8:   # 90 CCW: (x,y)->(1-y,x)
+        L, T, R, B = 1-B, L, 1-T, R
+
+    # clamp + re-order just in case
+    L, T, R, B = [max(0.0, min(1.0, v)) for v in (L, T, R, B)]
+    L, R = order(L, R); T, B = order(T, B)
+    return (L, T, R, B)
+
+
+
 
 @dataclass
 class Record:
@@ -63,7 +239,17 @@ class Record:
     crop_bottom: Optional[float] = None
     crop_angle: Optional[float] = None
     exif_normalize_for_crop: bool = True
+    exif_orientation: Optional[int] = None
     negative_scan: bool = False
+
+    # Lightroom Transform sliders
+    persp_vertical: Optional[float] = None
+    persp_horizontal: Optional[float] = None
+    persp_rotate: Optional[float] = None
+    persp_scale: Optional[float] = None
+    persp_aspect: Optional[float] = None
+    persp_x: Optional[float] = None
+    persp_y: Optional[float] = None
 
     def to_row(self) -> dict:
         return {
@@ -71,9 +257,7 @@ class Record:
             "xmp_path": self.xmp_path,
             "title": self.title or "",
             "description": self.description or "",
-            # legacy string for compatibility
             "keywords": "; ".join(self.keywords) if self.keywords else "",
-            # explicit forms for searching (frontend can use either)
             "keywords_text": "; ".join(self.keywords) if self.keywords else "",
             "keywords_list": list(self.keywords) if self.keywords else [],
             "hierarchical_keywords": "; ".join(self.hierarchical_keywords) if self.hierarchical_keywords else "",
@@ -83,9 +267,25 @@ class Record:
             "film": self.film or "",
             "thumb_path": self.thumb_path or "",
             "negative_scan": bool(self.negative_scan),
-            # viewer expects this; JS will also backfill, but emit here when we know
             "missing": bool(self.negative_scan),
         }
+
+
+
+def _crs_float(desc: ET.Element, tag: str) -> Optional[float]:
+    val = desc.get(f"{{{NS['crs']}}}{tag}")
+    if val is None:
+        node = desc.find(f"crs:{tag}", NS)
+        if node is not None and node.text:
+            val = node.text
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except Exception:
+        return None
+    
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -121,75 +321,126 @@ def parse_args() -> argparse.Namespace:
                    help="Which items get thumbnails: 'selected' (default) or 'strict' (print_id or negative_sleeve)")
     return p.parse_args()
 
+
 def make_thumbnail(image_path: Path, thumbs_dir: Path, max_px: int,
                    crop_box: Optional[tuple] = None,
                    crop_angle: Optional[float] = None,
-                   exif_normalize: bool = True) -> Optional[Path]:
+                   exif_normalize: bool = True,
+                   exif_orientation: Optional[int] = None,
+                   lr_perspective: Optional[dict] = None) -> Optional[Path]:
     """
-    Lightroom-like pipeline:
-      1) Normalize EXIF orientation (transpose) if exif_normalize=True.
-      2) Rotate by -CropAngle (LR is clockwise-positive; PIL is CCW-positive),
-         with expand=False (keep canvas size).
-      3) Crop using normalized (L,T,R,B) in [0..1] on that rotated canvas.
-      4) Resize and save.
-    Falls back to sips fast path only if NO crop and NO angle.
+    Build thumbnail reliably:
+      - RAW: decode via sips → JPEG for PIL; apply orientation/crop.
+      - Non-RAW: open directly; if exif_normalize=True, use exif_transpose.
+      - Apply LR Transform (perspective), then crop angle, then normalized crop box.
     """
     try:
         thumbs_dir.mkdir(parents=True, exist_ok=True)
         out = thumbs_dir / (image_path.stem + ".jpg")
 
-        # Fast path ONLY when there's no crop and no angle
-        use_fast_sips = (crop_box is None and (crop_angle is None or abs(crop_angle) < 1e-6))
-        if use_fast_sips and shutil.which("sips"):
-            cmd = [
-                "sips", "-Z", str(max_px),
-                image_path.as_posix(),
-                "--setProperty", "format", "jpeg",
-                "--out", out.as_posix()
-            ]
+        # Fast path (no crop/angle) for non-RAW via sips
+        use_fast_sips = (
+            crop_box is None
+            and (crop_angle is None or abs(crop_angle) < 1e-6)
+            and not lr_perspective  # ← ensure we don’t skip PIL when perspective exists
+        )
+        if use_fast_sips and shutil.which("sips") and image_path.suffix.lower() not in RAW_EXTS:
+            cmd = ["sips", "-Z", str(max_px), image_path.as_posix(),
+                   "--setProperty", "format", "jpeg", "--out", out.as_posix()]
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if res.returncode == 0 and out.exists():
                 return out
-            # otherwise fall through to PIL
 
-        from PIL import Image, ImageOps
-        with Image.open(image_path.as_posix()) as im:
-            # 1) Normalize orientation ONLY if requested
-            if exif_normalize:
-                im = ImageOps.exif_transpose(im)
+        # --- Choose a PIL-openable source (decode RAW via sips to a temp JPEG) ---
+        src_for_pil = image_path
+        tmp_created = False
+        if image_path.suffix.lower() in RAW_EXTS:
+            decoded = _decode_raw_to_temp_jpeg_with_sips(image_path, 0)
+            if decoded and decoded.exists():
+                src_for_pil = decoded
+                tmp_created = True
 
-            # 2) Apply LR crop angle (LR is clockwise-positive → negate for PIL)
-            if crop_angle is not None and abs(crop_angle) > 1e-6:
-                im = im.rotate(-float(crop_angle), resample=Image.BICUBIC, expand=False)
+        try:
+            with Image.open(src_for_pil.as_posix()) as im:
+                baked_orientation: Optional[int] = None
 
-            # 3) Crop with normalized box in this canvas
-            if crop_box is not None:
-                nL, nT, nR, nB = crop_box
-                nL = max(0.0, min(1.0, float(nL)))
-                nT = max(0.0, min(1.0, float(nT)))
-                nR = max(0.0, min(1.0, float(nR)))
-                nB = max(0.0, min(1.0, float(nB)))
-                W, H = im.size
-                L = int(round(nL * W))
-                T = int(round(nT * H))
-                R = int(round(nR * W))
-                B = int(round(nB * H))
-                # guard
-                L = max(0, min(L, W)); R = max(0, min(R, W))
-                T = max(0, min(T, H)); B = max(0, min(B, H))
-                if R > L and B > T:
-                    im = im.crop((L, T, R, B))
+                # 1) Orientation
+                if exif_normalize:
+                    try:
+                        # read original Orientation tag (0x0112 == 274)
+                        try:
+                            ori_before = im.getexif().get(274)
+                        except Exception:
+                            ori_before = None
 
-            # 4) Resize
-            im.thumbnail((max_px, max_px))
-            im.convert("RGB").save(out.as_posix(), "JPEG", quality=85)
+                        im2 = ImageOps.exif_transpose(im)
+                        if im2 is not im:
+                            im = im2
+                            if isinstance(ori_before, int) and 2 <= ori_before <= 8:
+                                baked_orientation = ori_before
+                    except Exception:
+                        pass
+                else:
+                    if exif_orientation and exif_orientation != 1:
+                        im = _apply_tiff_orientation(im, exif_orientation)
+                        baked_orientation = exif_orientation
 
-        return out if out.exists() else None
+                # 2) Lightroom Transform (manual perspective)
+                if lr_perspective:
+                    im = _apply_manual_perspective(
+                        im,
+                        pv=lr_perspective.get("vertical"),
+                        ph=lr_perspective.get("horizontal"),
+                        px=lr_perspective.get("x"),
+                        py=lr_perspective.get("y"),
+                        pscale=lr_perspective.get("scale"),
+                        paspect=lr_perspective.get("aspect"),
+                        prot=lr_perspective.get("rotate"),
+                    )
+
+                # 3) Apply LR crop angle (LR is clockwise-positive → negate for PIL)
+                if crop_angle is not None:
+                    ca = float(crop_angle)
+                    if abs(ca) > 1e-6:
+                        im = im.rotate(-ca, resample=Image.BICUBIC, expand=False)
+
+                # 4) Crop with normalized box; REMAP if we baked an orientation
+                if crop_box is not None:
+                    eff_orientation = baked_orientation if baked_orientation else None
+                    nL, nT, nR, nB = _map_box_by_orientation(crop_box, eff_orientation)
+
+                    # clamp + order
+                    nL = max(0.0, min(1.0, float(nL)))
+                    nT = max(0.0, min(1.0, float(nT)))
+                    nR = max(0.0, min(1.0, float(nR)))
+                    nB = max(0.0, min(1.0, float(nB)))
+                    if nR < nL: nL, nR = nR, nL
+                    if nB < nT: nT, nB = nB, nT
+
+                    W, H = im.size
+                    L = int(round(nL * W)); T = int(round(nT * H))
+                    R = int(round(nR * W)); B = int(round(nB * H))
+                    L = max(0, min(L, W)); R = max(0, min(R, W))
+                    T = max(0, min(T, H)); B = max(0, min(B, H))
+                    if R > L and B > T:
+                        im = im.crop((L, T, R, B))
+
+                # 5) Resize + save
+                im.thumbnail((max_px, max_px))
+                im.convert("RGB").save(out.as_posix(), "JPEG", quality=85)
+
+            return out if out.exists() else None
+
+        finally:
+            if tmp_created:
+                try:
+                    os.remove(src_for_pil)
+                except Exception:
+                    pass
 
     except Exception as e:
         logging.debug("make_thumbnail failed for %s: %s", image_path, e)
         return None
-
 
 def find_associated_image(xmp_path: Path) -> Optional[Path]:
     stem = xmp_path.stem
@@ -485,11 +736,15 @@ def _derive_negative_scan_flag(rec: Record) -> None:
     if any(t in NEG_SCAN_TOKENS for t in toks):
         rec.negative_scan = True
 
-def parse_xmp_from_root(xmp_root: ET.Element, image_path_for_record: Optional[Path], xmp_path_for_record: Path) -> Record:
+def parse_xmp_from_root(xmp_root: ET.Element,
+                        image_path_for_record: Optional[Path],
+                        xmp_path_for_record: Path) -> Record:
     desc = xmp_root.find(".//rdf:RDF/rdf:Description", NS)
     if desc is None:
-        return Record(file_path=str(image_path_for_record or ""), xmp_path=str(xmp_path_for_record))
+        return Record(file_path=str(image_path_for_record or ""),
+                      xmp_path=str(xmp_path_for_record))
 
+    # Title / description
     title = None
     title_alt = desc.find("dc:title/rdf:Alt/rdf:li", NS)
     if title_alt is not None and title_alt.text:
@@ -504,10 +759,14 @@ def parse_xmp_from_root(xmp_root: ET.Element, image_path_for_record: Optional[Pa
     if desc_alt is not None and desc_alt.text:
         description = desc_alt.text.strip()
 
+    # Keywords
     keywords = extract_dc_bag_items(desc, "dc:subject")
     h_keywords = extract_dc_bag_items(desc, "lr:hierarchicalSubject")
+
+    # Crop (if present)
     lr_crop = extract_lr_crop(desc)
 
+    # Build record
     rec = Record(
         file_path=str(image_path_for_record or ""),
         xmp_path=str(xmp_path_for_record),
@@ -516,12 +775,37 @@ def parse_xmp_from_root(xmp_root: ET.Element, image_path_for_record: Optional[Pa
         keywords=keywords,
         hierarchical_keywords=h_keywords,
     )
+
+    # Orientation from XMP (TIFF/EXIF semantics 1..8)
+    try:
+        o = desc.get(f"{{{NS['tiff']}}}Orientation")
+        if o is None:
+            node = desc.find("tiff:Orientation", NS)
+            if node is not None and node.text:
+                o = node.text
+        if o is not None:
+            rec.exif_orientation = int(str(o).strip())
+    except Exception:
+        pass
+
+    # Apply crop values if present
     if lr_crop:
         rec.crop_left   = lr_crop.get("left")
         rec.crop_top    = lr_crop.get("top")
         rec.crop_right  = lr_crop.get("right")
         rec.crop_bottom = lr_crop.get("bottom")
         rec.crop_angle  = lr_crop.get("angle")
+
+    # --- Lightroom manual Transform sliders (best-effort; read regardless of crop) ---
+    rec.persp_vertical   = _crs_float(desc, "PerspectiveVertical")
+    rec.persp_horizontal = _crs_float(desc, "PerspectiveHorizontal")
+    rec.persp_rotate     = _crs_float(desc, "PerspectiveRotate")
+    rec.persp_scale      = _crs_float(desc, "PerspectiveScale")
+    rec.persp_aspect     = _crs_float(desc, "PerspectiveAspect")
+    rec.persp_x          = _crs_float(desc, "PerspectiveX")
+    rec.persp_y          = _crs_float(desc, "PerspectiveY")
+
+    # Derivations
     _assign_keywords(rec)
     _derive_negative_scan_flag(rec)
     _derive_film_sleeve_frame(rec)
@@ -529,16 +813,22 @@ def parse_xmp_from_root(xmp_root: ET.Element, image_path_for_record: Optional[Pa
 
 def parse_xmp(xmp_or_image_file: Path) -> Record:
     if xmp_or_image_file.suffix.lower() == ".xmp":
-        try:
-            tree = ET.parse(xmp_or_image_file)
-            root = tree.getroot()
-        except ET.ParseError as e:
-            logging.warning("XML parse error in %s: %s", xmp_or_image_file, e)
-            return Record(file_path=str(find_associated_image(xmp_or_image_file) or ""), xmp_path=str(xmp_or_image_file))
-        image = find_associated_image(xmp_or_image_file)
-        rec = parse_xmp_from_root(root, image, xmp_or_image_file)
-        rec.exif_normalize_for_crop = False  # sidecar: do NOT EXIF-normalize for crop
-        return rec
+      try:
+          tree = ET.parse(xmp_or_image_file)
+          root = tree.getroot()
+      except ET.ParseError as e:
+          logging.warning("XML parse error in %s: %s", xmp_or_image_file, e)
+          return Record(file_path=str(find_associated_image(xmp_or_image_file) or ""), xmp_path=str(xmp_or_image_file))
+
+      image = find_associated_image(xmp_or_image_file)
+      rec = parse_xmp_from_root(root, image, xmp_or_image_file)
+
+      # ✅ NEW: respect EXIF orientation even when crop is present
+      # Lightroom doesn’t store 90° rotations in XMP for sidecar-based raws;
+      # use EXIF orientation flag from the image itself.
+      rec.exif_normalize_for_crop = False
+
+      return rec
 
     root = extract_embedded_xmp(xmp_or_image_file)
     if root is None:
@@ -548,18 +838,20 @@ def parse_xmp(xmp_or_image_file: Path) -> Record:
     return rec
 
 def walk_targets(root: Path) -> Iterable[Path]:
-    """
-    Yield .xmp sidecars; then yield images that do NOT have a sidecar
-    in the same directory (prevents skipping JPGs in sibling folders).
-    """
-    sidecar_keys = set()  # (dirpath, stem)
+    sidecar_keys = set()
     for p in root.rglob("*.xmp"):
         if p.is_file():
             sidecar_keys.add((str(p.parent.resolve()), p.stem))
             yield p
+
     exts = tuple(e.lower() for e in IMAGE_EXTS)
     for p in root.rglob("*"):
-        if p.is_file() and p.suffix.lower() in exts:
+        if not p.is_file():
+            continue
+        if p.suffix.lower() in exts:
+            # skip temp decodes like _DSC9171.sips.jpg / .sips.jpeg
+            if p.name.endswith(".sips.jpg") or p.name.endswith(".sips.jpeg"):
+                continue
             key = (str(p.parent.resolve()), p.stem)
             if key not in sidecar_keys:
                 yield p
@@ -792,6 +1084,9 @@ def write_index_html(out_dir: Path) -> None:
   <button id="toggleThumbs">Hide thumbnails</button>
   <button id="clearFilters" class="btn">Clear filters</button>
   <button id="openEditor" class="btn">Edit archive…</button>
+
+  <button id="openEditor" class="btn">Edit archive…</button>
+  <span id="archiveCount" class="muted" style="margin-left:auto">0/0</span>
 </header>
 
 <div id="cards" class="cards"></div>
@@ -822,6 +1117,9 @@ def write_index_html(out_dir: Path) -> None:
 </div>
 
 <script>
+
+
+
 console.log("__BUILD_TAG__ loaded");
 
 (async function(){
@@ -893,7 +1191,27 @@ console.log("__BUILD_TAG__ loaded");
     }
   }
 
+  const HELPER_URL = "http://127.0.0.1:8787";
+  async function helper(action, absPath){
+    try{
+      const res = await fetch(`${HELPER_URL}/api/${action}`, {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({path: absPath})
+      });
+      const out = await res.json();
+      if(!out.ok) throw new Error(out.error || 'Helper error');
+    }catch(e){
+      alert(`Could not ${action}:\n${e.message}\n\nIs filehelper.py running?`);
+    }
+  }
+
   const items = catalog.concat(placeholders);
+
+  const totalCount = items.length;
+  const countEl = document.getElementById('archiveCount');
+  function setCount(n){ if(countEl) countEl.textContent = `${n}/${totalCount}`; }
+  setCount(totalCount); // initial: before any filters apply
 
   // Backfill + normalize fields for the UI
   // Backfill + normalize fields for the UI
@@ -962,6 +1280,19 @@ for (const i of items) {
     }
   }
 })();
+
+function toFileURL(absPath, opts) {
+  opts = opts || {};
+  var folder = !!opts.folder;
+
+  if (!absPath) return "";
+  // Windows-safe: convert backslashes → slashes without regex pitfalls
+  var p = String(absPath).split("\\\\").join("/");
+
+  if (folder) p = p.replace(/\/[^\/]+$/, "/");   // strip filename → keep trailing slash
+  if (!p.startsWith("/")) p = "/" + p;           // ensure leading slash
+  return "file://" + encodeURI(p);               // file:///… (properly encoded)
+}
 
   // -------- UI references
   const $ = s => document.querySelector(s);
@@ -1174,17 +1505,20 @@ for (const i of items) {
     return true;
   }
 
+  // --- Smarter natural sort (handles 2022-1, 2022-10, 2022-2 correctly) ---
   function sortItems(arr){
-    const key=sortKey.value;
+    const key = sortKey.value;
+    const collator = new Intl.Collator(undefined, {numeric:true, sensitivity:'base'});
     return arr.slice().sort((a,b)=>{
-      const A = String(((a && a[key] != null) ? a[key] : '')).toLowerCase();
-      const B = String(((b && b[key] != null) ? b[key] : '')).toLowerCase();
-      return A<B?-1:A>B?1:0;
+      const A = (a && a[key]) ? String(a[key]).toLowerCase() : '';
+      const B = (b && b[key]) ? String(b[key]).toLowerCase() : '';
+      return collator.compare(A,B);
     });
   }
   function render(){
     cards.classList.toggle('cards--list', viewMode.value==='list');
     const filtered = sortItems(items.filter(matches));
+    setCount(filtered.length);
     cards.innerHTML='';
     for(const i of filtered){
       const card=document.createElement('div'); card.className='card';
@@ -1214,8 +1548,53 @@ for (const i of items) {
       content.append(meta);
 
       if(i.description){ const p=document.createElement('div'); p.className='row muted'; p.textContent=i.description; content.append(p); }
-      if(i.file_path && !i.missing){ const link=document.createElement('a'); link.href=i.file_path; link.textContent='Local file path'; link.target='_blank'; content.append(link); }
+      if (i.file_path && !i.missing) {
+        const rowEl = document.createElement('div');
+        rowEl.className = 'row';
 
+        async function action(cmd, path){
+          try{
+            const res = await fetch('/action', {
+              method: 'POST',
+              headers: {'Content-Type':'application/json'},
+              body: JSON.stringify({cmd, path})
+            });
+            if(!res.ok){
+              const t = await res.text();
+              throw new Error(t || res.status);
+            }
+          }catch(e){
+            alert(`Could not ${cmd}: ${e}`);
+          }
+        }
+
+        const btnReveal = document.createElement('button');
+        btnReveal.className = 'btn';
+        btnReveal.type = 'button';
+        btnReveal.textContent = 'Reveal in Finder';
+        btnReveal.addEventListener('click', ()=> action('reveal', i.file_path));
+
+        const btnOpen = document.createElement('button');
+        btnOpen.className = 'btn';
+        btnOpen.type = 'button';
+        btnOpen.textContent = 'Open file';
+        btnOpen.addEventListener('click', ()=> action('open', i.file_path));
+
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'btn';
+        copyBtn.type = 'button';
+        copyBtn.textContent = 'Copy path';
+        copyBtn.addEventListener('click', async () => {
+          try {
+            await navigator.clipboard.writeText(i.file_path);
+            copyBtn.textContent = 'Copied!';
+            setTimeout(() => (copyBtn.textContent = 'Copy path'), 1000);
+          } catch {}
+        });
+
+        rowEl.append(btnReveal, document.createTextNode(' '), btnOpen, document.createTextNode(' '), copyBtn);
+        content.append(rowEl);
+      }
       row.append(content); card.append(row); cards.append(card);
     }
   }
@@ -1488,6 +1867,8 @@ def is_archive_member(rec: Record, mode: str, require_keyword: List[str], requir
 
 # -------------------- main --------------------
 
+# -------------------- main --------------------
+
 def main():
     args = parse_args()
     logging.basicConfig(level=getattr(logging, args.log.upper(), logging.INFO),
@@ -1599,7 +1980,24 @@ def main():
                 if nr > nl and nb > nt:
                     crop_box = (nl, nt, nr, nb)
 
-            todo.append((r, p, out_thumb, crop_box, r.crop_angle))
+            # Build LR perspective dict (only if any slider exists)
+            lr_persp = None
+            if any(v is not None for v in (
+                r.persp_vertical, r.persp_horizontal, r.persp_rotate,
+                r.persp_scale, r.persp_aspect, r.persp_x, r.persp_y
+            )):
+                lr_persp = {
+                    "vertical":   r.persp_vertical,
+                    "horizontal": r.persp_horizontal,
+                    "rotate":     r.persp_rotate,
+                    "scale":      r.persp_scale,
+                    "aspect":     r.persp_aspect,
+                    "x":          r.persp_x,
+                    "y":          r.persp_y,
+                }
+
+            # queue work item (include lr_persp)
+            todo.append((r, p, out_thumb, crop_box, r.crop_angle, lr_persp))
 
         total = len(todo)
         logging.info(
@@ -1609,12 +2007,14 @@ def main():
 
         done = 0
         last_print = 0.0
-        for r, p, out_thumb, crop_box, crop_angle in todo:
+        for r, p, out_thumb, crop_box, crop_angle, lr_persp in todo:
             t = make_thumbnail(
                 p, thumbs_dir, args.thumb_size,
                 crop_box=crop_box,
                 crop_angle=crop_angle,
-                exif_normalize=r.exif_normalize_for_crop
+                exif_normalize=r.exif_normalize_for_crop,
+                exif_orientation=r.exif_orientation,
+                lr_perspective=lr_persp,   # ← pass perspective to apply LR Transform
             )
             done += 1
             if t:
