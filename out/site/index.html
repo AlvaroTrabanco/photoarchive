@@ -202,13 +202,9 @@
       </div>
       <button id="lightboxClose" class="btn">× Close</button>
     </header>
-
     <img id="lightboxImage"
          alt=""
          style="max-width:100%;height:auto;display:block;margin:0 auto 4px;" />
-
-    <!-- Caption for title / print_id -->
-    <div id="lightboxCaption" class="muted" style="text-align:center;margin-top:4px;"></div>
   </div>
 </div>
 
@@ -402,69 +398,59 @@ Is filehelper.py running?`);
   const zoom = $('#zoom');
   const clearFiltersBtn = $('#clearFilters');
 
+  // Lightbox state: list of items with thumbs + current index in that list
+  let lightboxItems = [];
+  let lightboxCurrentIndex = -1;
+
   // Lightbox DOM
   const lightboxBackdrop = document.getElementById('lightboxBackdrop');
-  const lightboxImg = document.getElementById('lightboxImage'); // ID = lightboxImage in HTML
+  const lightboxImage = document.getElementById('lightboxImage');
   const lightboxClose = document.getElementById('lightboxClose');
   const lightboxPrev = document.getElementById('lightboxPrev');
   const lightboxNext = document.getElementById('lightboxNext');
-  const lightboxCaption = document.getElementById('lightboxCaption');
-
-  // Lightbox state
-  let lightboxItems = [];          // only items with thumbnails, in DOM order
-  let lightboxCurrentIndex = -1;   // index into lightboxItems
-  let lightboxCurrentId = null;    // stable id for card highlight
 
 
-    function openLightboxForIndex(idx){
-    if (!lightboxItems.length) return;
+    function openLightboxForIndex(idx) {
+      if (!lightboxItems || !lightboxItems.length) return;
+      if (idx < 0 || idx >= lightboxItems.length) return;
 
-    const n = lightboxItems.length;
-    // safe wrap-around
-    lightboxCurrentIndex = ((idx % n) + n) % n;
+      lightboxCurrentIndex = idx;
 
-    const rec = lightboxItems[lightboxCurrentIndex];
-    if (!rec || !rec.thumb_path) return;
+      const item = lightboxItems[lightboxCurrentIndex];
+      const title = (item.print_id || item.title || 'Untitled');
+      const src = item.thumb_path ? (item.thumb_path + '?ts=' + Date.now()) : '';
 
-    // stable key used by render() to add .card--active
-    lightboxCurrentId = rec.thumb_path || rec.file_path || rec.print_id || null;
+      if (!src) return;
 
-    lightboxImg.src = rec.thumb_path + '?ts=' + Date.now();
-    lightboxImg.alt = rec.print_id || rec.title || '';
+      lightboxImage.src = src;
+      lightboxImage.alt = title;
+      lightboxBackdrop.style.display = 'flex';
+      lightboxBackdrop.setAttribute('aria-hidden', 'false');
 
-    if (lightboxCaption) {
-      lightboxCaption.textContent = rec.print_id || rec.title || '';
+      // Re-render so the correct card gets the orange outline
+      render();
     }
 
-    lightboxBackdrop.style.display = 'flex';
-    lightboxBackdrop.setAttribute('aria-hidden', 'false');
+    function closeLightbox() {
+      lightboxBackdrop.style.display = 'none';
+      lightboxBackdrop.setAttribute('aria-hidden', 'true');
+      lightboxImage.src = '';
+      lightboxCurrentIndex = -1;
+      // Re-render to clear any active card
+      render();
+    }
 
-    // re-render to update orange border on the matching card
-    render();
-  }
+    function showPrev() {
+      if (!lightboxItems || lightboxItems.length === 0) return;
+      if (lightboxCurrentIndex <= 0) return;
+      openLightboxForIndex(lightboxCurrentIndex - 1);
+    }
 
-  function closeLightbox() {
-    lightboxBackdrop.style.display = 'none';
-    lightboxBackdrop.setAttribute('aria-hidden', 'true');
-    lightboxImg.src = '';
-    lightboxImg.alt = '';
-    lightboxCurrentIndex = -1;
-    lightboxCurrentId = null;
-
-    // re-render to remove .card--active from any card
-    render();
-  }
-
-  function showPrev() {
-    if (!lightboxItems.length || lightboxCurrentIndex < 0) return;
-    openLightboxForIndex(lightboxCurrentIndex - 1);
-  }
-
-  function showNext() {
-    if (!lightboxItems.length || lightboxCurrentIndex < 0) return;
-    openLightboxForIndex(lightboxCurrentIndex + 1);
-  }
-
+    function showNext() {
+      if (!lightboxItems || lightboxItems.length === 0) return;
+      if (lightboxCurrentIndex < 0 || lightboxCurrentIndex >= lightboxItems.length - 1) return;
+      openLightboxForIndex(lightboxCurrentIndex + 1);
+    }
 
   lightboxClose.addEventListener('click', closeLightbox);
   lightboxPrev.addEventListener('click', showPrev);
@@ -692,8 +678,10 @@ function render(){
   setCount(filtered.length);
   cards.innerHTML = '';
 
-  // Lightbox list: only items that have a thumbnail, in the same visual order
+  // Build lightboxItems as "only items with thumbs", in the same visual order
   lightboxItems = filtered.filter(i => i.thumb_path);
+
+  let thumbIndex = 0; // index inside lightboxItems
 
   filtered.forEach((i) => {
     const card = document.createElement('div');
@@ -702,7 +690,6 @@ function render(){
     const row = document.createElement('div');
     if (viewMode.value === 'list') row.className = 'list-row';
 
-    // used for click handler if this item is in lightboxItems
     let thisLightboxIndex = -1;
 
     if (i.thumb_path) {
@@ -712,15 +699,15 @@ function render(){
       img.alt = title;
       img.style.display = showThumbs ? 'block' : 'none';
 
-      // find this record's index inside lightboxItems (thumb-only list)
-      thisLightboxIndex = lightboxItems.indexOf(i);
+      // this card corresponds to lightboxItems[thumbIndex]
+      thisLightboxIndex = thumbIndex;
 
+      // open lightbox at this index (in the thumbs-only list)
       img.addEventListener('click', () => {
-        if (thisLightboxIndex !== -1) {
-          openLightboxForIndex(thisLightboxIndex);
-        }
+        openLightboxForIndex(thisLightboxIndex);
       });
 
+      thumbIndex += 1;
       row.append(img);
     } else if (i.missing) {
       const ph = document.createElement('div');
@@ -800,9 +787,8 @@ function render(){
       content.append(rowEl);
     }
 
-    // --- highlight currently open card by stable ID ---
-    const key = i.thumb_path || i.file_path || i.print_id || null;
-    if (key && key === lightboxCurrentId) {
+    // highlight card if it’s the currently open lightbox image
+    if (thisLightboxIndex !== -1 && thisLightboxIndex === lightboxCurrentIndex) {
       card.classList.add('card--active');
     }
 
@@ -811,7 +797,6 @@ function render(){
     cards.append(card);
   });
 }
-
   statusSel.addEventListener('change', render);
   viewMode.addEventListener('change', render);
   sortKey.addEventListener('change', render);

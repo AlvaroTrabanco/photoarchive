@@ -1226,7 +1226,7 @@ Is filehelper.py running?`);
 
     if (!absPath) return "";
     // Windows-safe: convert backslashes → slashes without regex pitfalls
-    var p = String(absPath).split("\\").join("/");
+    var p = String(absPath).split("\\\\").join("/");
 
     if (folder) p = p.replace(/\/[^\/]+$/, "/");   // strip filename → keep trailing slash
     if (!p.startsWith("/")) p = "/" + p;           // ensure leading slash
@@ -1245,66 +1245,60 @@ Is filehelper.py running?`);
   const toggleThumbsBtn = $('#toggleThumbs');
   const zoom = $('#zoom');
   const clearFiltersBtn = $('#clearFilters');
-    // Lightbox state
+
+  // Lightbox state: list of items with thumbs + current index in that list
+  let lightboxItems = [];
   let lightboxCurrentIndex = -1;
 
-    // Lightbox DOM
+  // Lightbox DOM
   const lightboxBackdrop = document.getElementById('lightboxBackdrop');
   const lightboxImage = document.getElementById('lightboxImage');
   const lightboxClose = document.getElementById('lightboxClose');
   const lightboxPrev = document.getElementById('lightboxPrev');
   const lightboxNext = document.getElementById('lightboxNext');
 
-  // Will hold the currently rendered (filtered+sorted) list
-  let lightboxItems = [];
-  let lightboxIndex = -1;
 
-  function highlightActiveCard() {
-    const prev = document.querySelector('.card--active');
-    if (prev) prev.classList.remove('card--active');
-    if (lightboxIndex < 0) return;
-    const cardEl = cards.children[lightboxIndex];
-    if (cardEl) cardEl.classList.add('card--active');
-  }
+    function openLightboxForIndex(idx) {
+      if (!lightboxItems || !lightboxItems.length) return;
+      if (idx < 0 || idx >= lightboxItems.length) return;
 
-  function openLightboxForIndex(idx) {
-    if (!lightboxItems || !lightboxItems.length) return;
-    if (idx < 0 || idx >= lightboxItems.length) return;
-    lightboxIndex = idx;
+      lightboxCurrentIndex = idx;
 
-    const item = lightboxItems[lightboxIndex];
-    const title = (item.print_id || item.title || 'Untitled');
-    const src = item.thumb_path ? (item.thumb_path + '?ts=' + Date.now()) : '';
+      const item = lightboxItems[lightboxCurrentIndex];
+      const title = (item.print_id || item.title || 'Untitled');
+      const src = item.thumb_path ? (item.thumb_path + '?ts=' + Date.now()) : '';
 
-    if (!src) return;
+      if (!src) return;
 
-    lightboxImage.src = src;
-    lightboxImage.alt = title;
-    lightboxBackdrop.style.display = 'flex';
-    lightboxBackdrop.setAttribute('aria-hidden', 'false');
+      lightboxImage.src = src;
+      lightboxImage.alt = title;
+      lightboxBackdrop.style.display = 'flex';
+      lightboxBackdrop.setAttribute('aria-hidden', 'false');
 
-    highlightActiveCard();
-  }
-
-  function closeLightbox() {
-    lightboxBackdrop.style.display = 'none';
-    lightboxBackdrop.setAttribute('aria-hidden', 'true');
-    lightboxImage.src = '';
-    lightboxIndex = -1;
-    const prev = document.querySelector('.card--active');
-    if (prev) prev.classList.remove('card--active');
-  }
-
-  function showPrev() {
-    if (lightboxIndex <= 0) return;
-    openLightboxForIndex(lightboxIndex - 1);
-  }
-
-  function showNext() {
-    if (lightboxItems && lightboxIndex >= 0 && lightboxIndex < lightboxItems.length - 1) {
-      openLightboxForIndex(lightboxIndex + 1);
+      // Re-render so the correct card gets the orange outline
+      render();
     }
-  }
+
+    function closeLightbox() {
+      lightboxBackdrop.style.display = 'none';
+      lightboxBackdrop.setAttribute('aria-hidden', 'true');
+      lightboxImage.src = '';
+      lightboxCurrentIndex = -1;
+      // Re-render to clear any active card
+      render();
+    }
+
+    function showPrev() {
+      if (!lightboxItems || lightboxItems.length === 0) return;
+      if (lightboxCurrentIndex <= 0) return;
+      openLightboxForIndex(lightboxCurrentIndex - 1);
+    }
+
+    function showNext() {
+      if (!lightboxItems || lightboxItems.length === 0) return;
+      if (lightboxCurrentIndex < 0 || lightboxCurrentIndex >= lightboxItems.length - 1) return;
+      openLightboxForIndex(lightboxCurrentIndex + 1);
+    }
 
   lightboxClose.addEventListener('click', closeLightbox);
   lightboxPrev.addEventListener('click', showPrev);
